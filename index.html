@@ -841,7 +841,7 @@ function TopBar({ title, subtitle, onBack, right }) {
         display: "flex",
         alignItems: "center",
         gap: 10,
-        padding: "calc(14px + env(safe-area-inset-top, 0px)) 16px 14px",
+        padding: "max(14px + env(safe-area-inset-top, 0px), 34px) 16px 14px",
         background: HEADER.bg,
         borderBottom: `1px solid ${HEADER.border}`,
         position: "sticky",
