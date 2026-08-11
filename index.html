@@ -160,6 +160,7 @@ const LIGHT_TOKENS = {
   teal: "#3C6EA5",
   tealDeep: "#122A4E",
   danger: "#B23B31",
+  dangerDeep: "#7C2A21",
   dangerBg: "#F6E4E1",
   okBg: "#E6ECF3",
   lockBg: "#EDEFEA",
@@ -176,6 +177,7 @@ const DARK_TOKENS = {
   teal: "#7FA9D4",
   tealDeep: "#3E6FA0",
   danger: "#E0796B",
+  dangerDeep: "#5C2A22",
   dangerBg: "#3A211D",
   okBg: "#1C2A3A",
   lockBg: "#20262A",
@@ -649,6 +651,15 @@ function compareWasteCode(a, b) {
   return ra - rb;
 }
 
+// 廃液コードの頭文字（A/B）でUIの配色を切り替える（A系統＝青、B系統＝赤）
+function wasteAccent(code) {
+  const isB = typeof code === "string" && code.trim().toUpperCase().startsWith("B");
+  return {
+    text: isB ? C.danger : C.teal,         // コードタグなど、地の色の上に乗せる文字色
+    deep: isB ? C.dangerDeep : C.tealDeep, // バナー背景など、白文字を乗せる濃色
+  };
+}
+
 function slugify(name) {
   return "loc_" + name.trim().toLowerCase().replace(/\s+/g, "_") + "_" + Math.random().toString(36).slice(2, 6);
 }
@@ -983,6 +994,7 @@ function LockedField({ label, value, unit }) {
 
 // 廃液分類の呼び名は「コード」が主役（A-4無・B-5等）。説明名称は補足として小さく添える。
 function WasteCodeTag({ waste, size = "normal" }) {
+  const accent = wasteAccent(waste.code);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
       <span
@@ -990,7 +1002,7 @@ function WasteCodeTag({ waste, size = "normal" }) {
           fontFamily: "'Space Grotesk', sans-serif",
           fontWeight: 700,
           fontSize: size === "large" ? 22 : size === "small" ? 13 : 16,
-          color: C.ink,
+          color: accent.text,
         }}
       >
         {waste.code}
@@ -1275,11 +1287,12 @@ function WasteTab({ wasteCategories, onOpenWaste, onOpenCalc, onOpenArchive, onA
         {sorted.map((w) => {
           const sum = summarizeEntries(w.entries);
           const ageWarn = isTankAgeWarning(w);
+          const accent = wasteAccent(w.code);
           return (
             <button
               key={w.id}
               onClick={() => onOpenWaste(w)}
-              style={{ textAlign: "left", background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "13px 14px", overflow: "hidden", cursor: "pointer", display: "flex" }}
+              style={{ textAlign: "left", background: C.paper, border: `1px solid ${C.line}`, borderLeft: `4px solid ${accent.deep}`, borderRadius: 12, padding: "13px 14px", overflow: "hidden", cursor: "pointer", display: "flex" }}
             >
               <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
                 <div style={{ flex: 1 }}>
@@ -1979,12 +1992,13 @@ function WastePage({ waste, onBack, onOpenSubstance, onAddOther, onDispose }) {
   const groups = useMemo(() => groupBySubstance(waste.entries), [waste.entries]);
   const tankVolume = useMemo(() => summarizeEntries(waste.entries).totalVolumeMl, [waste.entries]);
   const disposed = !!waste.disposed;
+  const accent = wasteAccent(waste.code);
 
   return (
     <div>
       <TopBar title="廃液管理" onBack={onBack} />
       <div style={{ padding: 16, paddingBottom: 100 }}>
-        <div style={{ borderRadius: 16, padding: "20px 18px", color: "#fff", marginBottom: 14, background: C.tealDeep }}>
+        <div style={{ borderRadius: 16, padding: "20px 18px", color: "#fff", marginBottom: 14, background: accent.deep }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, opacity: 0.85, fontSize: 12, marginBottom: 6 }}>
             <Trash2 size={14} /> 廃液分類
           </div>
