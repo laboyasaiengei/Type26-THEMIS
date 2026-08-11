@@ -66,6 +66,23 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
   @media (min-width: 1100px){
     .app-shell{ max-width: 1080px; }
   }
+
+  /* TopBarの背景だけ画面幅いっぱいに広げ、中身はapp-shellと同じ幅で揃える */
+  .topbar-bleed{
+    width: 100vw;
+    margin-left: calc(50% - 50vw);
+  }
+  .topbar-inner{
+    width: 100%;
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  @media (min-width: 768px){
+    .topbar-inner{ max-width: 900px; }
+  }
+  @media (min-width: 1100px){
+    .topbar-inner{ max-width: 1080px; }
+  }
 </style>
 <script>
 (function(){
@@ -848,11 +865,8 @@ function HazardStripe({ height = 6 }) {
 function TopBar({ title, subtitle, onBack, right }) {
   return (
     <div
+      className="topbar-bleed"
       style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "max(14px + env(safe-area-inset-top, 0px), 34px) 16px 14px",
         background: HEADER.bg,
         borderBottom: `1px solid ${HEADER.border}`,
         position: "sticky",
@@ -860,47 +874,57 @@ function TopBar({ title, subtitle, onBack, right }) {
         zIndex: 5,
       }}
     >
-      {onBack && (
-        <button
-          onClick={onBack}
-          aria-label="戻る"
-          style={{ border: "none", background: "transparent", color: HEADER.text, cursor: "pointer", display: "flex", padding: 6, marginLeft: -6 }}
-        >
-          <ArrowLeft size={20} />
-        </button>
-      )}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontFamily: "'Space Grotesk', sans-serif",
-            fontWeight: 700,
-            fontSize: 17,
-            color: HEADER.text,
-            letterSpacing: 0.2,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {title}
-        </div>
-        {subtitle && (
+      <div
+        className="topbar-inner"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "max(14px + env(safe-area-inset-top, 0px), 34px) 16px 14px",
+        }}
+      >
+        {onBack && (
+          <button
+            onClick={onBack}
+            aria-label="戻る"
+            style={{ border: "none", background: "transparent", color: HEADER.text, cursor: "pointer", display: "flex", padding: 6, marginLeft: -6 }}
+          >
+            <ArrowLeft size={20} />
+          </button>
+        )}
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{
-              fontSize: 11,
-              color: HEADER.textSoft,
-              marginTop: 1,
-              letterSpacing: 0.3,
+              fontFamily: "'Space Grotesk', sans-serif",
+              fontWeight: 700,
+              fontSize: 17,
+              color: HEADER.text,
+              letterSpacing: 0.2,
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
             }}
           >
-            {subtitle}
+            {title}
           </div>
-        )}
+          {subtitle && (
+            <div
+              style={{
+                fontSize: 11,
+                color: HEADER.textSoft,
+                marginTop: 1,
+                letterSpacing: 0.3,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {subtitle}
+            </div>
+          )}
+        </div>
+        {right}
       </div>
-      {right}
     </div>
   );
 }
