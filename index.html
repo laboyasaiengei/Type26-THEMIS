@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8" />
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="light">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
 <title>THEMIS</title>
 
@@ -863,10 +863,10 @@ function HazardStripe({ height = 6 }) {
   );
 }
 
-function TopBar({ title, subtitle, onBack, right }) {
+function TopBar({ title, subtitle, onBack, right, bleed = true, titleFont = "'Space Grotesk', sans-serif" }) {
   return (
     <div
-      className="topbar-bleed"
+      className={bleed ? "topbar-bleed" : undefined}
       style={{
         background: HEADER.bg,
         borderBottom: `1px solid ${HEADER.border}`,
@@ -876,7 +876,7 @@ function TopBar({ title, subtitle, onBack, right }) {
       }}
     >
       <div
-        className="topbar-inner"
+        className={bleed ? "topbar-inner" : undefined}
         style={{
           display: "flex",
           alignItems: "center",
@@ -896,7 +896,7 @@ function TopBar({ title, subtitle, onBack, right }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{
-              fontFamily: "'Space Grotesk', sans-serif",
+              fontFamily: titleFont,
               fontWeight: 700,
               fontSize: 17,
               color: HEADER.text,
@@ -2469,7 +2469,7 @@ function ConcentrationCalcBody({ onApply }) {
 function ConcentrationCalcPage({ onBack }) {
   return (
     <div>
-      <TopBar title="g/L 計算ツール" onBack={onBack} />
+      <TopBar title="g/L 計算ツール" onBack={onBack} titleFont="'Inter', sans-serif" />
       <ConcentrationCalcBody />
     </div>
   );
@@ -2483,6 +2483,8 @@ function ConcentrationCalcModal({ onClose, onApply }) {
       <div style={{ background: C.bg, borderRadius: "18px 18px 0 0", width: "100%", maxWidth: "min(96vw, 720px)", maxHeight: "88vh", overflowY: "auto" }}>
         <TopBar
           title="g/L 計算ツール"
+          bleed={false}
+          titleFont="'Inter', sans-serif"
           right={
             <button
               onClick={onClose}
@@ -2759,6 +2761,7 @@ const [theme, setTheme] = useState("light");
 Object.assign(C, theme === "dark" ? DARK_TOKENS : LIGHT_TOKENS);
 useEffect(() => {
   document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme;
 }, [theme]);
 const toggleTheme = () => {
   const next = theme === "dark" ? "light" : "dark";
