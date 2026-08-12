@@ -1401,7 +1401,7 @@ function LocationGroupPage({ prefix, chemicals, extraLocations, onBack, onOpenLo
 /*  ホーム：在庫タブ（全てグラム表記／使用状況は自動・編集不可）             */
 /* ------------------------------------------------------------------ */
 
-function InventoryTab({ chemicals, onRecord, onAdd, onDelete }) {
+function InventoryTab({ chemicals, onRecord, onEdit, onAdd, onDelete }) {
   return (
     <div style={{ padding: 16 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
@@ -1430,11 +1430,10 @@ function InventoryTab({ chemicals, onRecord, onAdd, onDelete }) {
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button
-                  onClick={() => stockKnown && onRecord(c)}
-                  disabled={!stockKnown}
-                  style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 12.5, fontWeight: 600, borderRadius: 8, padding: "8px 12px", cursor: stockKnown ? "pointer" : "not-allowed", opacity: stockKnown ? 1 : 0.45, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
+                  onClick={() => (stockKnown ? onRecord(c) : onEdit(c))}
+                  style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 12.5, fontWeight: 600, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
                 >
-                  <Package size={13} /> {stockKnown ? "記録する" : STATUS_META[status].sub}
+                  <Package size={13} /> {stockKnown ? "記録する" : "編集する"}
                 </button>
                   <button
                   onClick={() => onDelete(c)}
@@ -1937,12 +1936,11 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
 }
 
 /* ------------------------------------------------------------------ */
-/*  薬品編集ページ（分子式・区画・廃液分類はあとから編集可能）                 */
+/*  薬品編集ページ（分子式・重量・廃液分類・備考を編集可能）                    */
 /* ------------------------------------------------------------------ */
 
 function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
   const [formula, setFormula] = useState(chemical.formula || "");
-  const [subLocation, setSubLocation] = useState(chemical.subLocation || "");
   const [wasteId, setWasteId] = useState(chemical.wasteId || null);
   const [amount, setAmount] = useState(chemical.stock?.known === false ? "" : String(chemical.stock?.amount ?? ""));
   const [purpose, setPurpose] = useState(chemical.purpose || "");
@@ -1958,13 +1956,13 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
     boxSizing: "border-box",
   };
 
-  const canSave = subLocation.trim() !== "" && amount !== "" && !isNaN(parseFloat(amount));
+  const canSave = amount !== "" && !isNaN(parseFloat(amount));
 
   const handleSave = () => {
     if (!canSave) return;
     const amt = parseFloat(amount);
     const stock = { amount: Math.max(0, amt), capacity: 0, unit: "g", known: true };
-    onSave(chemical, { formula: formula.trim(), subLocation: subLocation.trim(), wasteId, stock, purpose: purpose.trim() });
+    onSave(chemical, { formula: formula.trim(), subLocation: chemical.subLocation || "", wasteId, stock, purpose: purpose.trim() });
   };
 
   return (
@@ -1972,10 +1970,7 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
       <TopBar title={`${chemical.name}を編集`} onBack={onBack} />
       <div style={{ padding: 16 }}>
         <SectionLabel>分子式（任意）</SectionLabel>
-        <input style={{ ...inputStyle, marginBottom: 16, fontFamily: "'Roboto Mono', monospace" }} value={formula} onChange={(e) => setFormula(e.target.value)} placeholder="例：CH3OH（略称でも可）" />
-
-        <SectionLabel>区画（必須・例：1 / A）</SectionLabel>
-        <input style={{ ...inputStyle, marginBottom: 20 }} value={subLocation} onChange={(e) => setSubLocation(e.target.value)} placeholder={`${chemical.location.name}の中の区画`} />
+        <input style={{ ...inputStyle, marginBottom: 20, fontFamily: "'Roboto Mono', monospace" }} value={formula} onChange={(e) => setFormula(e.target.value)} placeholder="例：CH3OH（略称でも可）" />
 
         <SectionLabel>現在の重量（必須・g）</SectionLabel>
         <input type="number" inputMode="decimal" style={{ ...inputStyle, marginBottom: 6 }} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="現在の重量" />
@@ -3369,6 +3364,7 @@ const handleDeleteWasteCategories = (wastes) => {
                 <InventoryTab
                   chemicals={chemicals}
                   onRecord={(c) => push({ view: "record", id: c.id })}
+                  onEdit={(c) => push({ view: "editChemical", id: c.id })}
                   onAdd={() => push({ view: "addChemical" })}
                   onDelete={handleDeleteChemical}
                 />
