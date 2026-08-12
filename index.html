@@ -522,7 +522,7 @@ async function seedIfNeeded() {
 
 // Excel薬品台帳を既存のFirestoreにも一度だけ反映する。
 // 既存ユーザーが追加した薬品は残し、初期モック(c1〜c8)だけを置き換える。
-const EXCEL_IMPORT_VERSION = "2026-08-12-casless-v2";
+const EXCEL_IMPORT_VERSION = "2026-08-12-weights-v3";
 async function syncExcelInventoryIfNeeded() {
   const markerRef = db.collection("meta").doc("excelInventoryImport");
   const markerSnap = await markerRef.get();
