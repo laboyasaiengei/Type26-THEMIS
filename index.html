@@ -674,11 +674,56 @@ function summarizeEntries(entries) {
   };
 }
 
+// 場所名の表記ゆれを吸収する（Excelインポート時の「冷蔵庫１」「冷蔵庫 1」等をまとめる）
+function canonicalLocationName(name) {
+  const n = (name || "").trim();
+  if (n === "冷蔵庫１" || n === "冷蔵庫 1") return "冷蔵庫1";
+  if (n === "冷蔵庫②" || n === "冷蔵庫 ②") return "冷蔵庫2";
+  return n;
+}
+
+// Excelインポート時に自動で付いた定型メモは表示上不要なので消す
+function cleanLocationNote(note) {
+  return note === "Excel「場所タグ」から取り込み" ? "" : (note || "");
+}
+
 // 保管場所名が「数字-数字」の形式（例：1-1〜1-6）なら、先頭の数字を返す。
-// それ以外（冷蔵庫①など）はnullを返し、グループ化の対象外とする。
+// それ以外（冷蔵庫1など）はnullを返し、グループ化の対象外とする。
 function locationGroupPrefix(name) {
-  const m = /^(\d+)-\d+$/.exec((name || "").trim());
+  const m = /^(\d+)-\d+$/.exec(canonicalLocationName(name || "").trim());
   return m ? m[1] : null;
+}
+
+// 表示名を組み立てる。数字だけの場所（例：「2」）は「場所2」と表示する。
+// 「1-1」などの区画名はそのまま表示する（親カードのほうは別途「場所1」にする）。
+function displayLocationName(name) {
+  const canon = canonicalLocationName(name);
+  if (/^\d+$/.test(canon)) return `場所${canon}`;
+  return canon;
+}
+
+// 並び順を決めるためのラベル。「1-1」などの区画も親グループと同じ「場所1」扱いにする。
+function locationRankLabel(name) {
+  const canon = canonicalLocationName(name);
+  const dashMatch = /^(\d+)-\d+$/.exec(canon);
+  if (dashMatch) return `場所${dashMatch[1]}`;
+  if (/^\d+$/.test(canon)) return `場所${canon}`;
+  return canon;
+}
+
+// 保管場所一覧の並び順：場所1〜5 → 冷蔵庫1・2 → 465冷蔵庫 → 465/466実験室 → 場所未設定 → その他
+const LOCATION_DISPLAY_ORDER = ["場所1", "場所2", "場所3", "場所4", "場所5", "冷蔵庫1", "冷蔵庫2", "465冷蔵庫", "465実験室", "466実験室", "場所未設定"];
+function locationSortRank(name) {
+  const idx = LOCATION_DISPLAY_ORDER.indexOf(locationRankLabel(name));
+  return idx === -1 ? LOCATION_DISPLAY_ORDER.length : idx;
+}
+
+// 場所を集計する際のキー。「1-1」等の区画は区画ごとに個別のまま保つが、
+// それ以外（冷蔵庫の表記ゆれ等）は正規化した名前でひとつにまとめる。
+function locationMergeKey(loc) {
+  const canon = canonicalLocationName(loc.name);
+  if (/^\d+-\d+$/.test(canon)) return "id:" + loc.id;
+  return "name:" + canon;
 }
 
 // タンク内の記録を薬品(substanceName)ごとにグループ化する
@@ -1169,12 +1214,16 @@ function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, o
   const locations = useMemo(() => {
     const map = new Map();
     chemicals.forEach((c) => {
-      if (!map.has(c.location.id)) map.set(c.location.id, { ...c.location, items: [] });
-      map.get(c.location.id).items.push(c);
+      const key = locationMergeKey(c.location);
+      if (!map.has(key)) {
+        map.set(key, { ...c.location, name: canonicalLocationName(c.location.name), note: cleanLocationNote(c.location.note), items: [] });
+      }
+      map.get(key).items.push(c);
     });
     // まだ薬品が置かれていない、追加だけされた場所もここに合流させる
     (extraLocations || []).forEach((l) => {
-      if (!map.has(l.id)) map.set(l.id, { id: l.id, name: l.name, note: l.note || "", items: [] });
+      const key = locationMergeKey(l);
+      if (!map.has(key)) map.set(key, { id: l.id, name: canonicalLocationName(l.name), note: cleanLocationNote(l.note), items: [] });
     });
     // 場所メタ情報(extraLocations)にorderがあれば、薬品由来の場所にもマージする
     const metaById = new Map((extraLocations || []).map((l) => [l.id, l]));
@@ -1186,13 +1235,16 @@ function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, o
       const ao = a.order === null ? Infinity : a.order;
       const bo = b.order === null ? Infinity : b.order;
       if (ao !== bo) return ao - bo;
+      const ra = locationSortRank(a.name);
+      const rb = locationSortRank(b.name);
+      if (ra !== rb) return ra - rb;
       return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
     });
     return list;
   }, [chemicals, extraLocations]);
 
-  // 「1-1」「1-2」...のように先頭の数字が同じ場所は、ひとつの「◯番台」カードにまとめる。
-  // 元の並び順（order／名前順）はグループの挿入位置にそのまま引き継ぐ。
+  // 「1-1」「1-2」...のように先頭の数字が同じ場所は、ひとつの「場所◯」カードにまとめる。
+  // 元の並び順（order／ランク順）はグループの挿入位置にそのまま引き継ぐ。
   const displayList = useMemo(() => {
     const groupMap = new Map();
     locations.forEach((loc) => {
@@ -1266,22 +1318,13 @@ function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, o
                 {loc.isGroup ? <Package size={16} color={C.tealDeep} /> : <MapPin size={16} color={C.tealDeep} />}
               </div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{loc.isGroup ? `${loc.name}番台` : loc.name}</div>
+                <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{loc.isGroup ? `場所${loc.name}` : displayLocationName(loc.name)}</div>
                 <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 2 }}>
                   {loc.items.length}品目{loc.note ? `・${loc.note}` : ""}
                 </div>
               </div>
               <Chevron />
             </button>
-            {!loc.isGroup && (
-              <button
-                onClick={() => onDelete(loc)}
-                aria-label="削除"
-                style={{ border: `1.5px solid ${C.danger}`, background: C.dangerBg, color: C.danger, borderRadius: 8, padding: "7px", cursor: "pointer", display: "flex", flexShrink: 0 }}
-              >
-                <Trash2 size={13} />
-              </button>
-            )}
           </div>
         ))}
         {displayList.length === 0 && (
@@ -1295,7 +1338,7 @@ function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, o
 }
 
 /* ------------------------------------------------------------------ */
-/*  「1番台」などのグループページ：1-1〜1-6のような細かい場所の一覧          */
+/*  「場所1」などのグループページ：1-1〜1-6のような細かい場所の一覧          */
 /* ------------------------------------------------------------------ */
 
 function LocationGroupPage({ prefix, chemicals, extraLocations, onBack, onOpenLocation }) {
@@ -1303,12 +1346,12 @@ function LocationGroupPage({ prefix, chemicals, extraLocations, onBack, onOpenLo
     const map = new Map();
     chemicals.forEach((c) => {
       if (locationGroupPrefix(c.location.name) !== prefix) return;
-      if (!map.has(c.location.id)) map.set(c.location.id, { ...c.location, items: [] });
+      if (!map.has(c.location.id)) map.set(c.location.id, { ...c.location, note: cleanLocationNote(c.location.note), items: [] });
       map.get(c.location.id).items.push(c);
     });
     (extraLocations || []).forEach((l) => {
       if (locationGroupPrefix(l.name) !== prefix) return;
-      if (!map.has(l.id)) map.set(l.id, { id: l.id, name: l.name, note: l.note || "", items: [] });
+      if (!map.has(l.id)) map.set(l.id, { id: l.id, name: l.name, note: cleanLocationNote(l.note), items: [] });
     });
     const list = Array.from(map.values());
     list.sort((a, b) => {
@@ -1321,7 +1364,7 @@ function LocationGroupPage({ prefix, chemicals, extraLocations, onBack, onOpenLo
 
   return (
     <div>
-      <TopBar title={`${prefix}番台の保管場所`} onBack={onBack} />
+      <TopBar title={`場所${prefix}の保管場所`} onBack={onBack} />
       <div style={{ padding: 16 }}>
         <SectionLabel>サブロケーション一覧</SectionLabel>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -2005,8 +2048,10 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
 /* ------------------------------------------------------------------ */
 
 function LocationPage({ location, chemicals, onBack, onSelectChemical, onEdit }) {
-  const items = chemicals.filter((c) => c.location.id === location.id);
-  const loc = items[0]?.location || location; // 編集後すぐ最新表示にするため
+  const canonName = canonicalLocationName(location.name);
+  const items = chemicals.filter((c) => canonicalLocationName(c.location.name) === canonName);
+  const rawLoc = items[0]?.location || location; // 編集後すぐ最新表示にするため
+  const loc = { ...rawLoc, name: displayLocationName(canonName), note: cleanLocationNote(rawLoc.note) };
 
   // 場所の中の細かい区画（例：1, 2, A, B）ごとにグループ化する。
   // 区画が未設定の薬品は「区画未設定」としてまとめて表示する。
@@ -3069,17 +3114,23 @@ const toggleTheme = () => {
   };
 
   const handleEditLocation = async (location, { name, note }) => {
+    // 表記ゆれ（「冷蔵庫１」「冷蔵庫 1」等）で分かれている薬品・場所も、
+    // 正規化した名前が一致するものはまとめて同じ内容で保存する
+    const canonName = canonicalLocationName(location.name);
+    const targetChemicals = chemicals.filter((c) => canonicalLocationName(c.location.name) === canonName);
     const batch = db.batch();
-    chemicals
-      .filter((c) => c.location.id === location.id)
-      .forEach((c) => {
-        batch.update(db.collection("chemicals").doc(c.id), {
-          "location.name": name,
-          "location.note": note,
-        });
+    const touchedLocationIds = new Set([location.id]);
+    targetChemicals.forEach((c) => {
+      batch.update(db.collection("chemicals").doc(c.id), {
+        "location.name": name,
+        "location.note": note,
       });
+      touchedLocationIds.add(c.location.id);
+    });
     // 薬品がまだ無い場所（「場所を追加」で作った場所）の名前・補足もここで一緒に保存する
-    batch.set(db.collection("locations").doc(location.id), { name, note }, { merge: true });
+    touchedLocationIds.forEach((id) => {
+      batch.set(db.collection("locations").doc(id), { name, note }, { merge: true });
+    });
     await batch.commit();
     pop();
   };
