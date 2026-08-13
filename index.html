@@ -1882,7 +1882,7 @@ function WasteArchivePage({ wasteCategories, onBack, onOpenWaste, onDeleteWastes
 
 function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpenWaste, onRecord, onDelete, onRecordWaste }) {
   const status = autoStatus(chemical.stock);
-  const stockKnown = chemical.stock?.known !== false;
+  const stockKnown = !!chemical.stock && chemical.stock.known !== false;
   // waste（廃液分類）が見つからない場合でも画面がクラッシュしないよう、代替表示にフォールバックする
   const safeWaste = waste || UNKNOWN_WASTE;
   const hasWaste = !!waste;
@@ -2866,7 +2866,7 @@ function RecordMassPage({ chemical, onBack, onSave }) {
           </div>
           <div style={{ textAlign: "right" }}>
             <div style={{ fontSize: 11, color: C.inkSoft }}>現在庫</div>
-            <div style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 600, color: C.ink }}>{chemical.stock.amount} g</div>
+            <div style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 600, color: C.ink }}>{chemical.stock?.amount ?? 0} g</div>
           </div>
         </div>
 
