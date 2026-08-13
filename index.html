@@ -1438,11 +1438,11 @@ function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
     return map;
   }, [chemicals]);
 
-  // 在庫量（重量）と保管場所の両方がまだ登録されていない薬品だけに絞り込む
+  // 在庫量（重量）または保管場所のどちらかが未登録の薬品を対象にする
   const unregistered = useMemo(
     () =>
       chemicals
-        .filter((c) => c.stock?.known === false && isLocationUnregistered(c.location))
+        .filter((c) => c.stock?.known === false || isLocationUnregistered(c.location))
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
     [chemicals]
   );
@@ -1465,6 +1465,8 @@ function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {unregistered.map((c) => {
           const status = autoStatus(c.stock);
+          const stockKnown = c.stock?.known !== false;
+          const locationUnregistered = isLocationUnregistered(c.location);
           const hasNoOtherStock = (nameCounts.get(c.name) || 0) <= 1;
           return (
             <div key={c.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px" }}>
@@ -1472,7 +1474,11 @@ function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{c.name}</div>
                   <div style={{ fontSize: 13, color: C.inkSoft, marginTop: 3 }}>
-                    在庫量・保管場所とも未登録
+                    {!stockKnown && locationUnregistered
+                      ? "在庫量・保管場所とも未登録"
+                      : !stockKnown
+                      ? "在庫量が未登録"
+                      : "保管場所が未登録"}
                   </div>
                 </div>
                 <AutoStatusBadge statusKey={status} size="small" />
@@ -1484,7 +1490,7 @@ function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
                 >
                   <Package size={13} /> 編集する
                 </button>
-                {hasNoOtherStock && (
+                {!stockKnown && hasNoOtherStock && (
                   <button
                     onClick={() => onMarkNoStock(c)}
                     style={{ border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink, fontSize: 12.5, fontWeight: 600, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
@@ -3243,6 +3249,9 @@ const toggleTheme = () => {
 
   // 未登録（重量不明）の薬品を「在庫なし」として確定させる。他に同名の在庫が無い時だけ使える簡易操作。
   const handleMarkNoStock = async (chem) => {
+    if (typeof window !== "undefined" && window.confirm) {
+      if (!window.confirm(`「${chem.name}」を在庫なし（空）として記録しますか？`)) return;
+    }
     await db.collection("chemicals").doc(chem.id).update({
       stock: { amount: 0, capacity: 0, unit: "g", known: true, status: "empty" },
     });
