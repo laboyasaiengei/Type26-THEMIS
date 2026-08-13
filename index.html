@@ -1964,6 +1964,7 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
   const [locationName, setLocationName] = useState(chemical.location?.name || "");
   const [wasteId, setWasteId] = useState(chemical.wasteId || null);
   const [amount, setAmount] = useState(chemical.stock?.known === false ? "" : String(chemical.stock?.amount ?? ""));
+  const [isFull, setIsFull] = useState(chemical.stock?.known === false && chemical.stock?.status === "full");
   const [purpose, setPurpose] = useState(chemical.purpose || "");
 
   const inputStyle = {
@@ -1979,12 +1980,13 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
 
   const locationOptions = LOCATION_OPTIONS.includes(locationName) ? LOCATION_OPTIONS : [locationName, ...LOCATION_OPTIONS];
 
-  const canSave = amount !== "" && !isNaN(parseFloat(amount)) && locationName !== "";
+  const canSave = locationName !== "" && (isFull || (amount !== "" && !isNaN(parseFloat(amount))));
 
   const handleSave = () => {
     if (!canSave) return;
-    const amt = parseFloat(amount);
-    const stock = { amount: Math.max(0, amt), capacity: 0, unit: "g", known: true };
+    const stock = isFull
+      ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
+      : { amount: Math.max(0, parseFloat(amount)), capacity: 0, unit: "g", known: true };
     onSave(chemical, { formula: formula.trim(), locationName, subLocation: chemical.subLocation || "", wasteId, stock, purpose: purpose.trim() });
   };
 
@@ -2002,11 +2004,57 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
           ))}
         </select>
 
-        <SectionLabel>現在の重量（必須・g）</SectionLabel>
-        <input type="number" inputMode="decimal" style={{ ...inputStyle, marginBottom: 6 }} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="現在の重量" />
-        <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
-          現在の重量を測って入力してください。
+        <SectionLabel>在庫量（必須）</SectionLabel>
+        <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+          <button
+            type="button"
+            onClick={() => setIsFull(false)}
+            style={{
+              flex: 1,
+              textAlign: "center",
+              border: `1.5px solid ${!isFull ? C.tealDeep : C.line}`,
+              background: !isFull ? "#fff" : C.paper,
+              color: !isFull ? C.tealDeep : C.inkSoft,
+              borderRadius: 10,
+              padding: "10px 13px",
+              fontSize: 13.5,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            重量を記入
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsFull(true)}
+            style={{
+              flex: 1,
+              textAlign: "center",
+              border: `1.5px solid ${isFull ? C.tealDeep : C.line}`,
+              background: isFull ? "#fff" : C.paper,
+              color: isFull ? C.tealDeep : C.inkSoft,
+              borderRadius: 10,
+              padding: "10px 13px",
+              fontSize: 13.5,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            フル（未開封）
+          </button>
         </div>
+        {isFull ? (
+          <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
+            重量を測らずに「未開封（FULL）」として登録します
+          </div>
+        ) : (
+          <React.Fragment>
+            <input type="number" inputMode="decimal" style={{ ...inputStyle, marginBottom: 6 }} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="現在の重量" />
+            <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
+              現在の重量を測って入力してください。
+            </div>
+          </React.Fragment>
+        )}
 
         <SectionLabel>備考（任意）</SectionLabel>
         <textarea
@@ -2839,12 +2887,12 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
   const [name, setName] = useState("");
   const [formula, setFormula] = useState("");
   const [locationName, setLocationName] = useState(LOCATION_OPTIONS[0]);
-  const [subLocation, setSubLocation] = useState("");
   const [amount, setAmount] = useState("");
+  const [isFull, setIsFull] = useState(false);
   const [purpose, setPurpose] = useState("");
   const [wasteId, setWasteId] = useState(null);
 
-  const canSave = name.trim() && locationName && subLocation.trim() && amount !== "" && !isNaN(parseFloat(amount));
+  const canSave = name.trim() && locationName && (isFull || (amount !== "" && !isNaN(parseFloat(amount))));
 
   const inputStyle = {
     width: "100%",
@@ -2863,8 +2911,9 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
       name: name.trim(),
       formula: formula.trim(),
       locationName,
-      subLocation: subLocation.trim(),
-      amount: parseFloat(amount),
+      subLocation: "",
+      amount: isFull ? null : parseFloat(amount),
+      isFull,
       purpose: purpose.trim(),
       wasteId,
     });
@@ -2889,26 +2938,67 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
             <option key={name} value={name}>{displayLocationName(name)}</option>
           ))}
         </select>
-        <input style={{ ...inputStyle, marginBottom: 4 }} value={subLocation} onChange={(e) => setSubLocation(e.target.value)} placeholder="区画（必須・例：1 / A）" />
-        <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 16 }}>
-          同じ場所の中の細かい区画（1〜6、A〜Cなど）を入力してください
+        <SectionLabel>在庫量（必須）</SectionLabel>
+        <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+          <button
+            type="button"
+            onClick={() => setIsFull(false)}
+            style={{
+              flex: 1,
+              textAlign: "center",
+              border: `1.5px solid ${!isFull ? C.tealDeep : C.line}`,
+              background: !isFull ? "#fff" : C.paper,
+              color: !isFull ? C.tealDeep : C.inkSoft,
+              borderRadius: 10,
+              padding: "10px 13px",
+              fontSize: 13.5,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            重量を記入
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsFull(true)}
+            style={{
+              flex: 1,
+              textAlign: "center",
+              border: `1.5px solid ${isFull ? C.tealDeep : C.line}`,
+              background: isFull ? "#fff" : C.paper,
+              color: isFull ? C.tealDeep : C.inkSoft,
+              borderRadius: 10,
+              padding: "10px 13px",
+              fontSize: 13.5,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            フル（未開封）
+          </button>
         </div>
-
-        <SectionLabel>現在の重量（必須・g）</SectionLabel>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.paper, border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "10px 13px", marginBottom: 8 }}>
-          <input
-            type="number"
-            inputMode="decimal"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            placeholder="0"
-            style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 16, fontFamily: "'Roboto Mono', monospace", color: C.ink }}
-          />
-          <span style={{ fontSize: 13, color: C.inkSoft, fontWeight: 600 }}>g</span>
-        </div>
-        <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
-          現在の重量を測って入力してください
-        </div>
+        {isFull ? (
+          <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
+            重量を測らずに「未開封（FULL）」として登録します
+          </div>
+        ) : (
+          <React.Fragment>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.paper, border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "10px 13px", marginBottom: 8 }}>
+              <input
+                type="number"
+                inputMode="decimal"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="0"
+                style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 16, fontFamily: "'Roboto Mono', monospace", color: C.ink }}
+              />
+              <span style={{ fontSize: 13, color: C.inkSoft, fontWeight: 600 }}>g</span>
+            </div>
+            <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
+              現在の重量を測って入力してください
+            </div>
+          </React.Fragment>
+        )}
 
         <SectionLabel>備考（任意）</SectionLabel>
         <textarea
@@ -3139,13 +3229,14 @@ const toggleTheme = () => {
     );
   };
 
-  const handleAddChemical = async ({ name, formula, locationName, subLocation, amount, purpose, wasteId }) => {
+  const handleAddChemical = async ({ name, formula, locationName, subLocation, amount, isFull, purpose, wasteId }) => {
     const location = resolveLocation(locationName);
     const newId = "c_" + Date.now();
+    const stock = isFull ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" } : { amount, capacity: 0, unit: "g", known: true };
     await db
       .collection("chemicals")
       .doc(newId)
-      .set({ name, formula: formula || "", location, subLocation: subLocation || "", stock: { amount, capacity: 0, unit: "g", known: true }, purpose: purpose || "", wasteId: wasteId || null });
+      .set({ name, formula: formula || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null });
     goHome("inventory");
   };
 
