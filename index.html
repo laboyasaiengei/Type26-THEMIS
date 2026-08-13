@@ -654,6 +654,25 @@ function autoStatus(stock) {
   if (stock.capacity > 0 && stock.amount >= stock.capacity) return "full";
   return "in_use";
 }
+
+// 在庫量の少ない順に並べるためのソート用の値。
+// 重量が未登録（known===false）のものは値が分からないので、常に一番下に回す。
+function stockSortValue(stock) {
+  if (!stock || stock.known === false) return Infinity;
+  return stock.amount;
+}
+
+// 検索・場所案内などで在庫量（g）を1行で表示するための文字列。
+function stockAmountLabel(stock) {
+  const status = autoStatus(stock);
+  return stock && stock.known !== false ? `${stock.amount} g` : STATUS_META[status].sub;
+}
+
+// 保管場所が「場所未設定」など、まだきちんと登録されていないかどうか。
+function isLocationUnregistered(location) {
+  const name = (location && location.name ? location.name : "").trim();
+  return name === "" || name === "場所未設定";
+}
 // タンク使用開始日から数えた経過日数。未設定なら null。
 function daysSinceTankStart(tankStartDate) {
   if (!tankStartDate) return null;
@@ -1155,9 +1174,11 @@ function SearchTab({ chemicals, onSelect, query, setQuery }) {
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return [];
-    return chemicals.filter((c) =>
-      [c.name, c.formula, c.purpose].filter(Boolean).join(" ").toLowerCase().includes(q)
-    );
+    return chemicals
+      .filter((c) =>
+        [c.name, c.formula, c.purpose].filter(Boolean).join(" ").toLowerCase().includes(q)
+      )
+      .sort((a, b) => stockSortValue(a.stock) - stockSortValue(b.stock));
   }, [query, chemicals]);
 
   return (
@@ -1209,6 +1230,9 @@ function SearchTab({ chemicals, onSelect, query, setQuery }) {
                   <div style={{ fontWeight: 600, fontSize: 15, color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{c.name}</div>
                   <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
                     <FormulaTag formula={c.formula} size={12} />
+                  </div>
+                  <div style={{ fontSize: 12.5, color: C.ink, marginTop: 6, fontFamily: "'Roboto Mono', monospace", fontWeight: 600 }}>
+                    {stockAmountLabel(c.stock)}
                   </div>
                 </div>
                 <AutoStatusBadge statusKey={status} size="small" />
@@ -1404,50 +1428,63 @@ function LocationGroupPage({ prefix, chemicals, extraLocations, onBack, onOpenLo
 }
 
 /* ------------------------------------------------------------------ */
-/*  ホーム：在庫タブ（全てグラム表記／使用状況は自動・編集不可）             */
+/*  ホーム：在庫タブ（在庫量・保管場所がまだ未登録の薬品だけを表示）          */
 /* ------------------------------------------------------------------ */
 
-function InventoryTab({ chemicals, onRecord, onEdit, onDelete, onOpenLocation, onMarkNoStock }) {
+function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
   const nameCounts = useMemo(() => {
     const map = new Map();
     chemicals.forEach((c) => map.set(c.name, (map.get(c.name) || 0) + 1));
     return map;
   }, [chemicals]);
+
+  // 在庫量（重量）と保管場所の両方がまだ登録されていない薬品だけに絞り込む
+  const unregistered = useMemo(
+    () =>
+      chemicals
+        .filter((c) => c.stock?.known === false && isLocationUnregistered(c.location))
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+    [chemicals]
+  );
+
   return (
     <div style={{ padding: 16 }}>
       <div style={{ marginBottom: 8 }}>
-        <SectionLabel>在庫一覧（g表記）</SectionLabel>
+        <SectionLabel>在庫・場所が未登録の薬品（{unregistered.length}）</SectionLabel>
       </div>
+
+      {unregistered.length === 0 && (
+        <div style={{ textAlign: "center", padding: "48px 12px", color: C.inkSoft }}>
+          <Package size={24} style={{ marginBottom: 10, opacity: 0.5 }} />
+          <div style={{ fontSize: 14, lineHeight: 1.7 }}>
+            在庫量・保管場所が未登録の薬品はありません
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {chemicals.map((c) => {
+        {unregistered.map((c) => {
           const status = autoStatus(c.stock);
-          const stockKnown = c.stock?.known !== false;
           const hasNoOtherStock = (nameCounts.get(c.name) || 0) <= 1;
           return (
             <div key={c.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{c.name}</div>
-                  <div style={{ fontSize: 13, color: C.ink, marginTop: 3, fontFamily: "'Roboto Mono', monospace", fontWeight: 600 }}>
-                    {stockKnown ? `${c.stock.amount} g` : STATUS_META[status].sub}
+                  <div style={{ fontSize: 13, color: C.inkSoft, marginTop: 3 }}>
+                    在庫量・保管場所とも未登録
                   </div>
                 </div>
                 <AutoStatusBadge statusKey={status} size="small" />
               </div>
-              <button
-                onClick={() => onOpenLocation(c.location)}
-                style={{ display: "flex", alignItems: "center", gap: 5, border: "none", background: "transparent", padding: "6px 0 0", margin: 0, cursor: "pointer", color: C.tealDeep, fontSize: 12, fontWeight: 600 }}
-              >
-                <MapPin size={12} /> {displayLocationName(c.location.name)}{c.subLocation ? `（${c.subLocation}）` : ""}
-              </button>
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button
-                  onClick={() => (stockKnown ? onRecord(c) : onEdit(c))}
+                  onClick={() => onEdit(c)}
                   style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 12.5, fontWeight: 600, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
                 >
-                  <Package size={13} /> {stockKnown ? "記録する" : "編集する"}
+                  <Package size={13} /> 編集する
                 </button>
-                {!stockKnown && hasNoOtherStock && (
+                {hasNoOtherStock && (
                   <button
                     onClick={() => onMarkNoStock(c)}
                     style={{ border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink, fontSize: 12.5, fontWeight: 600, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
@@ -1455,9 +1492,9 @@ function InventoryTab({ chemicals, onRecord, onEdit, onDelete, onOpenLocation, o
                     在庫なし
                   </button>
                 )}
-                  <button
+                <button
                   onClick={() => onDelete(c)}
-                                    style={{ border: `1.5px solid ${C.danger}`, background: C.dangerBg, color: C.danger, fontSize: 12.5, fontWeight: 700, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}
+                  style={{ border: `1.5px solid ${C.danger}`, background: C.dangerBg, color: C.danger, fontSize: 12.5, fontWeight: 700, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}
                 >
                   <Trash2 size={13} /> 削除
                 </button>
@@ -2127,7 +2164,7 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
 /*  場所案内ページ                                                      */
 /* ------------------------------------------------------------------ */
 
-function LocationPage({ location, chemicals, onBack, onSelectChemical, onEdit }) {
+function LocationPage({ location, chemicals, onBack, onSelectChemical }) {
   const canonName = canonicalLocationName(location.name);
   const items = chemicals.filter((c) => canonicalLocationName(c.location.name) === canonName);
   const rawLoc = items[0]?.location || location; // 編集後すぐ最新表示にするため
@@ -2135,6 +2172,7 @@ function LocationPage({ location, chemicals, onBack, onSelectChemical, onEdit })
 
   // 場所の中の細かい区画（例：1, 2, A, B）ごとにグループ化する。
   // 区画が未設定の薬品は「区画未設定」としてまとめて表示する。
+  // 各区画内は在庫量（g）の少ない順に並べる。
   const groups = useMemo(() => {
     const map = new Map();
     items.forEach((c) => {
@@ -2143,6 +2181,7 @@ function LocationPage({ location, chemicals, onBack, onSelectChemical, onEdit })
       map.get(key).push(c);
     });
     const entries = Array.from(map.entries());
+    entries.forEach(([, list]) => list.sort((a, b) => stockSortValue(a.stock) - stockSortValue(b.stock)));
     entries.sort((a, b) => {
       if (a[0] === "") return 1;
       if (b[0] === "") return -1;
@@ -2153,18 +2192,7 @@ function LocationPage({ location, chemicals, onBack, onSelectChemical, onEdit })
 
   return (
     <div>
-      <TopBar
-        title="場所案内"
-        onBack={onBack}
-        right={
-          <button
-            onClick={() => onEdit(loc)}
-            style={{ border: `1.5px solid ${C.line}`, background: C.paper, color: C.ink, fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "7px 11px", cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}
-          >
-            <Pencil size={13} /> 編集
-          </button>
-        }
-      />
+      <TopBar title="場所案内" onBack={onBack} />
       <div style={{ padding: 16 }}>
         <div style={{ background: C.tealDeep, borderRadius: 16, padding: "22px 18px", color: "#fff", marginBottom: 20 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, opacity: 0.85, fontSize: 12, marginBottom: 6 }}>
@@ -2193,6 +2221,9 @@ function LocationPage({ location, chemicals, onBack, onSelectChemical, onEdit })
                     <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{c.name}</div>
                     <div style={{ marginTop: 5 }}>
                       <FormulaTag formula={c.formula} size={11.5} />
+                    </div>
+                    <div style={{ fontSize: 12.5, color: C.ink, marginTop: 6, fontFamily: "'Roboto Mono', monospace", fontWeight: 600 }}>
+                      {stockAmountLabel(c.stock)}
                     </div>
                   </div>
                   <Chevron />
@@ -3486,10 +3517,8 @@ const handleDeleteWasteCategories = (wastes) => {
               {homeTab === "inventory" && (
                 <InventoryTab
                   chemicals={chemicals}
-                  onRecord={(c) => push({ view: "record", id: c.id })}
                   onEdit={(c) => push({ view: "editChemical", id: c.id })}
                   onDelete={handleDeleteChemical}
-                  onOpenLocation={(loc) => push({ view: "location", loc })}
                   onMarkNoStock={handleMarkNoStock}
                 />
               )}
@@ -3544,7 +3573,6 @@ const handleDeleteWasteCategories = (wastes) => {
             chemicals={chemicals}
             onBack={pop}
             onSelectChemical={(c) => push({ view: "detail", id: c.id })}
-            onEdit={(loc) => push({ view: "editLocation", loc })}
           />
         )}
 
