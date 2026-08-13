@@ -212,8 +212,8 @@ const DISPOSAL_POLICY = "タンク使用開始日から1年経過か、満杯時
 const UNKNOWN_WASTE = {
   id: null,
   code: "―",
-  name: "廃液分類が未設定・見つかりません",
-  note: "この薬品に登録されている廃液分類がすでに削除されている可能性があります。薬品の編集で分類を設定し直してください。",
+  name: "廃液分類が未設定です。",
+  note: "薬品の編集で分類を設定してください。",
   color: C.inkSoft,
   disposal: "",
   tankStartDate: null,
@@ -1927,7 +1927,7 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
               disabled={!stockKnown}
               style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 14, fontWeight: 600, borderRadius: 10, padding: "12px", cursor: stockKnown ? "pointer" : "not-allowed", opacity: stockKnown ? 1 : 0.45, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
             >
-              <Package size={16} /> {stockKnown ? "使用量を記録する" : STATUS_META[status].sub}
+              <Package size={16} /> {stockKnown ? "重量を記録する" : STATUS_META[status].sub}
             </button>
             <button
               onClick={() => onDelete(chemical)}
@@ -2083,7 +2083,7 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
               cursor: "pointer",
             }}
           >
-            フル（未開封）
+            FULL（未開封）
           </button>
         </div>
         {isFull ? (
@@ -3011,7 +3011,7 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
               cursor: "pointer",
             }}
           >
-            フル（未開封）
+            FULL（未開封）
           </button>
         </div>
         {isFull ? (
