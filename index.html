@@ -1883,9 +1883,14 @@ function WasteArchivePage({ wasteCategories, onBack, onOpenWaste, onDeleteWastes
 function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpenWaste, onRecord, onDelete, onRecordWaste }) {
   const status = autoStatus(chemical.stock);
   const stockKnown = !!chemical.stock && chemical.stock.known !== false;
-  // waste（廃液分類）が見つからない場合でも画面がクラッシュしないよう、代替表示にフォールバックする
-  const safeWaste = waste || UNKNOWN_WASTE;
   const hasWaste = !!waste;
+  const wasteDisposed = hasWaste && !!waste.disposed;
+  // 「この薬品の廃液を記録する」は、処分済み（アーカイブ）のタンクには書き込ませない
+  const canRecordWaste = hasWaste && !wasteDisposed;
+  // waste（廃液分類）が見つからない場合でも、薬品側に保存しておいたコード・名称のスナップショットがあれば
+  // それを使って表示する（元の分類が完全削除された後もラベルだけは残せるようにするため）
+  const archivedLabel = !hasWaste && chemical.wasteLabel ? chemical.wasteLabel : null;
+  const safeWaste = waste || (archivedLabel ? { ...UNKNOWN_WASTE, code: archivedLabel.code, name: archivedLabel.name } : UNKNOWN_WASTE);
 
   return (
     <div>
@@ -1927,7 +1932,7 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
               disabled={!stockKnown}
               style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 14, fontWeight: 600, borderRadius: 10, padding: "12px", cursor: stockKnown ? "pointer" : "not-allowed", opacity: stockKnown ? 1 : 0.45, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
             >
-              <Package size={16} /> {stockKnown ? "重量を記録する" : STATUS_META[status].sub}
+              <Package size={16} /> {stockKnown ? "使用量を記録する" : STATUS_META[status].sub}
             </button>
             <button
               onClick={() => onDelete(chemical)}
@@ -1973,12 +1978,24 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
           <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 12 }}>
             <Trash2 size={18} color={C.tealDeep} />
             <div style={{ flex: 1 }}>
-              {hasWaste ? (
-                <WasteCodeTag waste={safeWaste} size="small" />
+              {hasWaste || archivedLabel ? (
+                <>
+                  <WasteCodeTag waste={safeWaste} size="small" />
+                  {wasteDisposed && (
+                    <div style={{ fontSize: 11, color: C.inkSoft, marginTop: 4, lineHeight: 1.5 }}>
+                      このタンクは処分済みです。新しいタンクを使う場合は「編集」で分類を選び直してください
+                    </div>
+                  )}
+                  {!hasWaste && archivedLabel && (
+                    <div style={{ fontSize: 11, color: C.inkSoft, marginTop: 4, lineHeight: 1.5 }}>
+                      この分類はアーカイブから削除済みです（記録として保持しています）
+                    </div>
+                  )}
+                </>
               ) : (
                 <>
-                  <div style={{ fontWeight: 600, fontSize: 13.5, color: C.ink }}>{safeWaste.name}</div>
-                  <div style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 3, lineHeight: 1.5 }}>{renderFormula(safeWaste.note)}</div>
+                  <div style={{ fontWeight: 600, fontSize: 13.5, color: C.ink }}>{UNKNOWN_WASTE.name}</div>
+                  <div style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 3, lineHeight: 1.5 }}>{renderFormula(UNKNOWN_WASTE.note)}</div>
                 </>
               )}
             </div>
@@ -1987,11 +2004,11 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
         </button>
 
         <button
-          onClick={() => hasWaste && onRecordWaste(chemical, waste)}
-          disabled={!hasWaste}
-          style={{ width: "100%", border: `1.5px solid ${C.tealDeep}`, background: C.paper, color: C.ink, fontSize: 14, fontWeight: 700, borderRadius: 12, padding: "12px", cursor: hasWaste ? "pointer" : "not-allowed", opacity: hasWaste ? 1 : 0.6, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+          onClick={() => canRecordWaste && onRecordWaste(chemical, waste)}
+          disabled={!canRecordWaste}
+          style={{ width: "100%", border: `1.5px solid ${C.tealDeep}`, background: C.paper, color: C.ink, fontSize: 14, fontWeight: 700, borderRadius: 12, padding: "12px", cursor: canRecordWaste ? "pointer" : "not-allowed", opacity: canRecordWaste ? 1 : 0.6, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
         >
-          <Plus size={16} /> この薬品の廃液を記録する
+          <Plus size={16} /> {wasteDisposed ? "処分済みのため記録できません" : "この薬品の廃液を記録する"}
         </button>
       </div>
     </div>
@@ -3363,15 +3380,45 @@ const toggleTheme = () => {
   };
      
 const handleDisposeWaste = (waste) => {
+  // この分類（同じwasteId）を使っている薬品を数えて、確認メッセージに反映する
+  const linkedChemicals = chemicals.filter((c) => c.wasteId === waste.id);
+  const linkedNote = linkedChemicals.length > 0
+    ? `\n\nこの分類を使っている薬品（${linkedChemicals.length}件）は、自動的に新しく発行するタンクへ付け替えられます。`
+    : "";
+
   setPasscodeGate({
     title: "処分済みへの変更",
-    message: `「${waste.code} ${waste.name}」のタンクを処分済みにします。\nこの操作の後は編集ができなくなります。`,
+    message: `「${waste.code} ${waste.name}」のタンクを処分済みにします。\nこの操作の後は編集ができなくなります。同じ分類の新しいタンクを自動で発行します。${linkedNote}`,
     onCancel: () => setPasscodeGate(null),
     onConfirm: async () => {
-      await db.collection("wasteCategories").doc(waste.id).update({
+      const newId = "w_" + Date.now();
+      const batch = db.batch();
+
+      // 1) 古いタンクを処分済みにする
+      batch.update(db.collection("wasteCategories").doc(waste.id), {
         disposed: true,
         disposedAt: new Date().toISOString().slice(0, 10),
       });
+
+      // 2) 同じ分類（コード・名称・色・処分方法）で新しいタンクを発行する
+      batch.set(db.collection("wasteCategories").doc(newId), {
+        code: waste.code,
+        name: waste.name,
+        note: waste.note || "",
+        color: waste.color,
+        disposal: waste.disposal || DISPOSAL_POLICY,
+        tankStartDate: null,
+      });
+
+      // 3) この分類を使っていた薬品を、まとめて新タンクへ付け替える
+      linkedChemicals.forEach((c) => {
+        batch.update(db.collection("chemicals").doc(c.id), {
+          wasteId: newId,
+          wasteLabel: { code: waste.code, name: waste.name },
+        });
+      });
+
+      await batch.commit();
       setPasscodeGate(null);
       goHome("waste");
     },
