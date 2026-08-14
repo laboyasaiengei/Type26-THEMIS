@@ -1547,57 +1547,6 @@ function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
   );
 }
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {unregistered.map((c) => {
-          const status = autoStatus(c.stock);
-          const stockKnown = c.stock?.known !== false;
-          const locationUnregistered = isLocationUnregistered(c.location);
-          const hasNoOtherStock = (nameCounts.get(c.name) || 0) <= 1;
-          return (
-            <div key={c.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{c.name}</div>
-                  <div style={{ fontSize: 13, color: C.inkSoft, marginTop: 3 }}>
-                    {!stockKnown && locationUnregistered
-                      ? "在庫量・保管場所とも未登録"
-                      : !stockKnown
-                      ? "在庫量が未登録"
-                      : "保管場所が未登録"}
-                  </div>
-                </div>
-                <AutoStatusBadge statusKey={status} size="small" />
-              </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                <button
-                  onClick={() => onEdit(c)}
-                  style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 12.5, fontWeight: 600, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
-                >
-                  <Package size={13} /> 編集する
-                </button>
-                {!stockKnown && hasNoOtherStock && (
-                  <button
-                    onClick={() => onMarkNoStock(c)}
-                    style={{ border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink, fontSize: 12.5, fontWeight: 600, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
-                  >
-                    在庫なし
-                  </button>
-                )}
-                <button
-                  onClick={() => onDelete(c)}
-                  style={{ border: `1.5px solid ${C.danger}`, background: C.dangerBg, color: C.danger, fontSize: 12.5, fontWeight: 700, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}
-                >
-                  <Trash2 size={13} /> 削除
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 /* ------------------------------------------------------------------ */
 /*  ホーム：廃液タブ（分類＝タンクごと／コードを主役に表示）                  */
 /* ------------------------------------------------------------------ */
