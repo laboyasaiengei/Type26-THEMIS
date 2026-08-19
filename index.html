@@ -687,6 +687,26 @@ function isTankAgeWarning(waste) {
   const days = daysSinceTankStart(waste.tankStartDate);
   return days !== null && days >= 335;
 }
+
+// タンクの容量（20L=20000mL）
+const TANK_CAPACITY_ML = 20000;
+const TANK_CAPACITY_L = TANK_CAPACITY_ML / 1000;
+
+// タンク使用開始日から「交換目安日」（使用開始から1年後）を算出する。未設定ならnull。
+function tankReplaceDate(tankStartDate) {
+  if (!tankStartDate) return null;
+  const start = new Date(tankStartDate + "T00:00:00");
+  const replace = new Date(start.getTime() + 365 * 86400000);
+  const y = replace.getFullYear();
+  const m = String(replace.getMonth() + 1).padStart(2, "0");
+  const d = String(replace.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+// mL表記だと分かりづらいのでL表記（小数第2位まで）に変換する
+function mlToL(volumeMl) {
+  return Math.round((volumeMl / 1000) * 100) / 100;
+}
      
 // 濃度(g/L)を直接入力した記録の集合から、合計使用量・合成濃度(g/L)を算出する
 // ※必ず「同じ薬品(substanceName)」の記録同士に対して使うこと
@@ -1591,12 +1611,13 @@ function WasteTab({ wasteCategories, onOpenWaste, onOpenCalc, onOpenArchive, onA
         {sorted.map((w) => {
           const sum = summarizeEntries(w.entries);
           const ageWarn = isTankAgeWarning(w);
+          const replaceDate = tankReplaceDate(w.tankStartDate);
           const accent = wasteAccent(w.code);
           return (
             <button
               key={w.id}
               onClick={() => onOpenWaste(w)}
-              style={{ textAlign: "left", background: C.paper, border: `1px solid ${C.line}`, borderLeft: `4px solid ${accent.deep}`, borderRadius: 12, padding: "13px 14px", overflow: "hidden", cursor: "pointer", display: "flex" }}
+              style={{ textAlign: "left", background: C.paper, border: `1px solid ${C.line}`, borderLeft: `4px solid ${ageWarn ? C.danger : accent.deep}`, borderRadius: 12, padding: "13px 14px", overflow: "hidden", cursor: "pointer", display: "flex" }}
             >
               <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
                 <div style={{ flex: 1 }}>
@@ -1605,7 +1626,11 @@ function WasteTab({ wasteCategories, onOpenWaste, onOpenCalc, onOpenArchive, onA
                     {ageWarn && <AlertTriangle size={14} color={C.danger} />}
                   </div>
                   <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 6 }}>
-                    {w.entries.length}件の記録・合計 {sum.totalVolumeMl} mL
+                    {w.entries.length}件の記録・合計 {mlToL(sum.totalVolumeMl)} / {TANK_CAPACITY_L} L
+                  </div>
+                  <div style={{ fontSize: 11.5, marginTop: 3, fontWeight: 600, color: ageWarn ? C.danger : C.inkSoft }}>
+                    交換目安：{replaceDate || "未設定（未使用）"}
+                    {ageWarn && "（交換目安が近づいています）"}
                   </div>
                 </div>
                 <Chevron />
@@ -2421,7 +2446,35 @@ function WastePage({ waste, onBack, onOpenSubstance, onAddOther, onDispose }) {
             {waste.tankStartDate || "未設定"}
           </span>
         </div>
-           {!disposed && isTankAgeWarning(waste) && (
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", marginBottom: 12 }}>
+          <Calendar size={16} color={C.inkSoft} />
+          <span style={{ fontSize: 12.5, color: C.inkSoft }}>交換目安（使用開始から1年後）</span>
+          <span style={{ marginLeft: "auto", fontFamily: "'Roboto Mono', monospace", fontWeight: 700, color: isTankAgeWarning(waste) ? C.danger : C.ink }}>
+            {tankReplaceDate(waste.tankStartDate) || "未設定"}
+          </span>
+        </div>
+
+        <div style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12.5, color: C.inkSoft }}>タンク内容量</span>
+            <span style={{ marginLeft: "auto", fontFamily: "'Roboto Mono', monospace", fontWeight: 700, color: C.ink }}>
+              {mlToL(tankVolume)} / {TANK_CAPACITY_L} L
+            </span>
+          </div>
+          <div style={{ marginTop: 8, height: 8, borderRadius: 4, background: C.lockBg, overflow: "hidden" }}>
+            <div
+              style={{
+                width: `${Math.min(100, (tankVolume / TANK_CAPACITY_ML) * 100)}%`,
+                height: "100%",
+                borderRadius: 4,
+                background: C.teal,
+              }}
+            />
+          </div>
+        </div>
+
+        {!disposed && isTankAgeWarning(waste) && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.dangerBg, border: `1px solid ${C.danger}`, borderRadius: 12, padding: "12px 14px", marginBottom: 12, color: C.danger, fontSize: 12.5, fontWeight: 700 }}>
             <AlertTriangle size={16} />
             まもなく使用開始から1年経過します（{waste.tankStartDate}〜）。処分の準備をしてください。
