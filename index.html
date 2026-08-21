@@ -204,6 +204,43 @@ const DARK_TOKENS = {
 // オブジェクトの「中身」だけをテーマ切替時に丸ごと書き換える(mutate)。
 const C = { ...LIGHT_TOKENS };
 
+/* ---- 保存・削除失敗時などに使う簡易トースト通知（React外のDOMに直接描画） ---- */
+function showToast(msg, isError){
+  let t = document.getElementById("themisToast");
+  if(!t){
+    t = document.createElement("div");
+    t.id = "themisToast";
+    t.style.cssText = [
+      "position:fixed", "left:50%", "bottom:24px", "transform:translateX(-50%) translateY(20px)",
+      "color:#fff", "padding:10px 18px", "border-radius:10px", "font-size:13px",
+      "box-shadow:0 6px 20px rgba(0,0,0,.25)", "z-index:99999", "opacity:0",
+      "transition:opacity .2s, transform .2s", "pointer-events:none", "max-width:88vw", "text-align:center"
+    ].join(";");
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.background = isError ? (C.dangerDeep || "#B3261E") : (C.tealDeep || "#122A4E");
+  t.style.opacity = "1";
+  t.style.transform = "translateX(-50%) translateY(0)";
+  clearTimeout(showToast._tm);
+  showToast._tm = setTimeout(()=>{
+    t.style.opacity = "0";
+    t.style.transform = "translateX(-50%) translateY(20px)";
+  }, 2600);
+}
+/* 保存・削除操作の失敗理由を短く添えて表示する共通ヘルパー */
+function errDetail(e){
+  if(typeof navigator!=="undefined" && !navigator.onLine) return "オフラインです";
+  if(e && e.code==="permission-denied") return "アクセス権限がありません";
+  if(e && e.code) return e.code;
+  if(e && e.message) return e.message;
+  return "原因不明のエラー";
+}
+function toastFail(action, e){
+  console.error(action, e);
+  showToast(`${action}に失敗しました（${errDetail(e)}）`, true);
+}
+
 // どの分類も処分の考え方は共通（タンク単位のルール）
 const DISPOSAL_POLICY = "タンク使用開始日から1年経過か、満杯時に廃棄";
 
@@ -3348,7 +3385,9 @@ const toggleTheme = () => {
     const chem = chemicals.find((c) => c.id === chemId);
     if (!chem) return;
     const newAmount = Math.max(0, +remaining.toFixed(2));
-    await db.collection("chemicals").doc(chemId).update({ "stock.amount": newAmount });
+    try{
+      await db.collection("chemicals").doc(chemId).update({ "stock.amount": newAmount });
+    }catch(e){ toastFail("残量の保存", e); }
   };
 
   // 未登録（重量不明）の薬品を「在庫なし」として確定させる。他に同名の在庫が無い時だけ使える簡易操作。
@@ -3356,9 +3395,11 @@ const toggleTheme = () => {
     if (typeof window !== "undefined" && window.confirm) {
       if (!window.confirm(`「${chem.name}」を在庫なし（空）として記録しますか？`)) return;
     }
-    await db.collection("chemicals").doc(chem.id).update({
-      stock: { amount: 0, capacity: 0, unit: "g", known: true, status: "empty" },
-    });
+    try{
+      await db.collection("chemicals").doc(chem.id).update({
+        stock: { amount: 0, capacity: 0, unit: "g", known: true, status: "empty" },
+      });
+    }catch(e){ toastFail("在庫なしの記録", e); }
   };
 
   const resolveLocation = (rawName) => {
@@ -3377,11 +3418,13 @@ const toggleTheme = () => {
     const location = resolveLocation(locationName);
     const newId = "c_" + Date.now();
     const stock = isFull ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" } : { amount, capacity: 0, unit: "g", known: true };
-    await db
-      .collection("chemicals")
-      .doc(newId)
-      .set({ name, formula: formula || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null });
-    goHome("inventory");
+    try{
+      await db
+        .collection("chemicals")
+        .doc(newId)
+        .set({ name, formula: formula || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null });
+      goHome("inventory");
+    }catch(e){ toastFail("薬品の追加", e); }
   };
 
   const handleEditChemical = async (chem, { formula, locationName, subLocation, wasteId, stock, purpose }) => {
@@ -3393,8 +3436,10 @@ const toggleTheme = () => {
       purpose: purpose || "",
     };
     if (stock) updates.stock = stock;
-    await db.collection("chemicals").doc(chem.id).update(updates);
-    pop();
+    try{
+      await db.collection("chemicals").doc(chem.id).update(updates);
+      pop();
+    }catch(e){ toastFail("薬品情報の保存", e); }
   };
 
   const handleEditLocation = async (location, { name, note }) => {
@@ -3415,15 +3460,19 @@ const toggleTheme = () => {
     touchedLocationIds.forEach((id) => {
       batch.set(db.collection("locations").doc(id), { name, note }, { merge: true });
     });
-    await batch.commit();
-    pop();
+    try{
+      await batch.commit();
+      pop();
+    }catch(e){ toastFail("場所情報の保存", e); }
   };
 
   const handleAddLocation = async ({ name, note }) => {
     const id = slugify(name);
     const maxOrder = Math.max(-1, ...locationsMeta.map((l) => (typeof l.order === "number" ? l.order : -1)));
-    await db.collection("locations").doc(id).set({ name, note: note || "", order: maxOrder + 1 });
-    goHome("location");
+    try{
+      await db.collection("locations").doc(id).set({ name, note: note || "", order: maxOrder + 1 });
+      goHome("location");
+    }catch(e){ toastFail("場所の追加", e); }
   };
 
 
@@ -3437,33 +3486,41 @@ const toggleTheme = () => {
     if (typeof window !== "undefined" && window.confirm) {
       if (!window.confirm(`「${loc.name}」を保管場所一覧から削除しますか？`)) return;
     }
-    await db.collection("locations").doc(loc.id).delete();
+    try{
+      await db.collection("locations").doc(loc.id).delete();
+    }catch(e){ toastFail("場所の削除", e); }
   };
 
   const handleDeleteChemical = async (chem) => {
     if (typeof window !== "undefined" && window.confirm) {
       if (!window.confirm(`「${chem.name}」を薬品一覧から削除しますか？`)) return;
     }
-    await db.collection("chemicals").doc(chem.id).delete();
-    pop();
+    try{
+      await db.collection("chemicals").doc(chem.id).delete();
+      pop();
+    }catch(e){ toastFail("薬品の削除", e); }
   };
 
   const handleAddWasteEntry = async (wasteId, entry) => {
     const { id, ...rest } = entry;
-    await db.collection("wasteEntries").doc(id).set({ wasteId, ...rest });
-    const cat = wasteMeta.find((w) => w.id === wasteId);
-    if (cat && !cat.tankStartDate) {
-      await db.collection("wasteCategories").doc(wasteId).update({ tankStartDate: entry.date });
-    }
-    pop();
+    try{
+      await db.collection("wasteEntries").doc(id).set({ wasteId, ...rest });
+      const cat = wasteMeta.find((w) => w.id === wasteId);
+      if (cat && !cat.tankStartDate) {
+        await db.collection("wasteCategories").doc(wasteId).update({ tankStartDate: entry.date });
+      }
+      pop();
+    }catch(e){ toastFail("投入記録の保存", e); }
   };
 
   const handleDeleteWasteEntry = async (wasteId, entry) => {
     if (typeof window !== "undefined" && window.confirm) {
       if (!window.confirm(`${entry.date}・${entry.personName}の記録（${entry.substanceName}）を削除しますか？`)) return;
     }
-    await db.collection("wasteEntries").doc(entry.id).delete();
-    pop();
+    try{
+      await db.collection("wasteEntries").doc(entry.id).delete();
+      pop();
+    }catch(e){ toastFail("投入記録の削除", e); }
   };
      
 const handleDisposeWaste = (waste) => {
@@ -3505,9 +3562,14 @@ const handleDisposeWaste = (waste) => {
         });
       });
 
-      await batch.commit();
-      setPasscodeGate(null);
-      goHome("waste");
+      try{
+        await batch.commit();
+        setPasscodeGate(null);
+        goHome("waste");
+      }catch(e){
+        setPasscodeGate(null);
+        toastFail("処分済みへの変更", e);
+      }
     },
   });
 };
@@ -3519,16 +3581,21 @@ const handleAddWasteCategory = ({ code, name, note, color }) => {
     onCancel: () => setPasscodeGate(null),
     onConfirm: async () => {
       const newId = "w_" + Date.now();
-      await db.collection("wasteCategories").doc(newId).set({
-        code,
-        name,
-        note,
-        color,
-        disposal: DISPOSAL_POLICY,
-        tankStartDate: null,
-      });
-      setPasscodeGate(null);
-      goHome("waste");
+      try{
+        await db.collection("wasteCategories").doc(newId).set({
+          code,
+          name,
+          note,
+          color,
+          disposal: DISPOSAL_POLICY,
+          tankStartDate: null,
+        });
+        setPasscodeGate(null);
+        goHome("waste");
+      }catch(e){
+        setPasscodeGate(null);
+        toastFail("タンクの新規追加", e);
+      }
     },
   });
 };
@@ -3546,8 +3613,10 @@ const handleOpenChangePasscode = () => {
 };
 
 const handleSavePasscode = async (newPasscode) => {
-  await db.collection("meta").doc("settings").set({ passcode: newPasscode }, { merge: true });
-  goHome("waste");
+  try{
+    await db.collection("meta").doc("settings").set({ passcode: newPasscode }, { merge: true });
+    goHome("waste");
+  }catch(e){ toastFail("パスコードの変更", e); }
 };
 
 const handleDeleteWasteCategories = (wastes) => {
@@ -3567,9 +3636,15 @@ const handleDeleteWasteCategories = (wastes) => {
           batch.delete(db.collection("wasteCategories").doc(w.id));
           w.entries.forEach((e) => batch.delete(db.collection("wasteEntries").doc(e.id)));
         });
-        await batch.commit();
-        setPasscodeGate(null);
-        resolve(true);
+        try{
+          await batch.commit();
+          setPasscodeGate(null);
+          resolve(true);
+        }catch(e){
+          setPasscodeGate(null);
+          toastFail("アーカイブの削除", e);
+          resolve(false);
+        }
       },
     });
   });
