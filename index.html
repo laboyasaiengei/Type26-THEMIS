@@ -1075,21 +1075,26 @@ function TopBar({ title, subtitle, subtitle2, onBack, right, bleed = true, title
           </button>
         )}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div
-            style={{
-              fontFamily: titleFont,
-              fontWeight: 700,
-              fontSize: 17,
-              color: HEADER.text,
-              letterSpacing: 0.2,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-            }}
-          >
-            {title}
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div
+              style={{
+                fontFamily: titleFont,
+                fontWeight: 700,
+                fontSize: 17,
+                color: HEADER.text,
+                letterSpacing: 0.2,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                flex: 1,
+                minWidth: 0,
+              }}
+            >
+              {title}
+            </div>
+            {right}
           </div>
-                    {subtitle && (
+          {subtitle && (
             <div
               style={{
                 fontSize: 11,
@@ -1107,11 +1112,11 @@ function TopBar({ title, subtitle, subtitle2, onBack, right, bleed = true, title
           {subtitle2 && (
             <div
               style={{
-                fontSize: 9.5,
+                fontSize: 9,
                 color: HEADER.textSoft,
                 opacity: 0.75,
-                marginTop: 1,
-                letterSpacing: 0.2,
+                marginTop: 2,
+                letterSpacing: 0.1,
                 whiteSpace: "nowrap",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
@@ -1121,7 +1126,6 @@ function TopBar({ title, subtitle, subtitle2, onBack, right, bleed = true, title
             </div>
           )}
         </div>
-        {right}
       </div>
     </div>
   );
