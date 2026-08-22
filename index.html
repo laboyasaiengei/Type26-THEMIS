@@ -1044,7 +1044,7 @@ function HazardStripe({ height = 6 }) {
   );
 }
 
-function TopBar({ title, subtitle, onBack, right, bleed = true, titleFont = "'Space Grotesk', sans-serif" }) {
+function TopBar({ title, subtitle, subtitle2, onBack, right, bleed = true, titleFont = "'Space Grotesk', sans-serif" }) {
   return (
     <div
       className={bleed ? "topbar-bleed" : undefined}
@@ -1089,7 +1089,7 @@ function TopBar({ title, subtitle, onBack, right, bleed = true, titleFont = "'Sp
           >
             {title}
           </div>
-          {subtitle && (
+                    {subtitle && (
             <div
               style={{
                 fontSize: 11,
@@ -1102,6 +1102,22 @@ function TopBar({ title, subtitle, onBack, right, bleed = true, titleFont = "'Sp
               }}
             >
               {subtitle}
+            </div>
+          )}
+          {subtitle2 && (
+            <div
+              style={{
+                fontSize: 9.5,
+                color: HEADER.textSoft,
+                opacity: 0.75,
+                marginTop: 1,
+                letterSpacing: 0.2,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {subtitle2}
             </div>
           )}
         </div>
@@ -3795,9 +3811,10 @@ const handleDeleteWasteCategories = (wastes) => {
       <div className="app-shell" style={{ background: C.bg, display: "flex", flexDirection: "column" }}>
         {current.view === "home" && (
           <>
-            <TopBar
+<TopBar
   title="THEMIS"
   subtitle="薬品在庫・廃液管理システム"
+  subtitle2="Tracking of Hazardous materials and Effluent Management Information System"
   right={
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <button
