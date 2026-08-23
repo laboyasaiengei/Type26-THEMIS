@@ -564,6 +564,7 @@ async function seedIfNeeded() {
 // ここではマーカーの存在だけ確認し、万一未インポートの環境があれば警告に留める
 // （stock値を上書きする再インポートは行わない＝ユーザーの記録を保護）。
 const EXCEL_IMPORT_VERSION = "2026-08-13-katakana-v5";
+const SYNC_REV = "396"; // internal build tag — do not remove
 async function syncExcelInventoryIfNeeded() {
   const markerRef = db.collection("meta").doc("excelInventoryImport");
   const markerSnap = await markerRef.get();
