@@ -3372,6 +3372,7 @@ function ChemStockApp() {
   const [wasteEntriesRaw, setWasteEntriesRaw] = useState([]);
   const [locationsMeta, setLocationsMeta] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingStep, setLoadingStep] = useState("初期化中…");
   const [fatalError, setFatalError] = useState(firebaseInitError ? String(firebaseInitError.message || firebaseInitError) : null);
   const [homeTab, setHomeTab] = useState("search");
   const [searchQuery, setSearchQuery] = useState("");
@@ -3415,12 +3416,15 @@ const toggleTheme = () => {
     // 特定OS(端末)でApp Check/認証まわりのネットワーク通信が固まり、
     // 読み込み画面から一切進まなくなる不具合の対策。
     // 一定時間で強制的にタイムアウトさせ、エラー画面（再読み込み可能）に逃がす。
+    let currentStep = "サインイン中…";
+    const markStep = (label) => { currentStep = label; setLoadingStep(label); };
+
     let timeoutId = window.setTimeout(() => {
       timeoutId = null;
       if (cancelled) return;
-      console.error("startup timeout: signIn/appCheck等のネットワーク処理が既定時間内に完了しませんでした");
+      console.error("startup timeout: 「" + currentStep + "」の段階でネットワーク処理が既定時間内に完了しませんでした");
       setFatalError(
-        "通信に時間がかかっているため起動を中断しました。電波の良い場所で「再読み込み」をお試しください。（この端末・OSのバージョンで発生しやすい既知の症状です）"
+        `通信に時間がかかっているため起動を中断しました（「${currentStep}」で停止）。電波の良い場所で「再読み込み」をお試しください。（この端末・OSのバージョンで発生しやすい既知の症状です）`
       );
       setLoading(false);
     }, 15000);
@@ -3431,11 +3435,13 @@ const toggleTheme = () => {
       }
     };
 
+    setLoadingStep("サインイン中…");
     ensureSignedIn()
-      .then(() => seedIfNeeded())
-      .then(() => syncExcelInventoryIfNeeded())
-      .then(() => fixEvansBlueFullStatusIfNeeded())
+      .then(() => { markStep("初期データ確認中…"); return seedIfNeeded(); })
+      .then(() => { markStep("在庫Excel同期確認中…"); return syncExcelInventoryIfNeeded(); })
+      .then(() => { markStep("データ整合性チェック中…"); return fixEvansBlueFullStatusIfNeeded(); })
       .then(() => {
+        markStep("薬品データ取得中…");
         clearStartupTimeout();
         if (cancelled) return;
         unsubChem = db.collection("chemicals").onSnapshot(
@@ -3850,6 +3856,7 @@ const handleDeleteWasteCategories = (wastes) => {
         <style>{FONT_IMPORT}</style>
         <Spinner />
         <div style={{ color: C.inkSoft, fontSize: 13 }}>読み込み中…</div>
+        <div style={{ color: C.inkSoft, fontSize: 11, opacity: 0.7 }}>{loadingStep}</div>
       </div>
     );
   }
