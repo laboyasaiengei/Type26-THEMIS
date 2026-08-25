@@ -3447,7 +3447,6 @@ const toggleTheme = () => {
     ensureSignedIn()
       .then(() => {
         markStep("薬品データ取得中…");
-        clearStartupTimeout();
         if (cancelled) return;
 
         // seedIfNeeded / syncExcelInventoryIfNeeded / fixEvansBlueFullStatusIfNeeded は
@@ -3463,10 +3462,12 @@ const toggleTheme = () => {
 
         unsubChem = db.collection("chemicals").onSnapshot(
           (snap) => {
+            clearStartupTimeout();
             setChemicals(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
             setLoading(false);
           },
           (err) => {
+            clearStartupTimeout();
             console.error("chemicals subscription error", err);
             setFatalError("薬品データの取得に失敗しました：" + err.message);
             setLoading(false);
