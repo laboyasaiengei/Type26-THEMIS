@@ -505,11 +505,19 @@ const RECAPTCHA_V3_SITE_KEY = "6LeMq5ctAAAAAF-BqNcFg9WIZUzjHykV_x9XH-I8";
 // ローカルで動作確認する時だけ有効化（本番公開時はコメントアウトのままでOK）
 // self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
 
+// 動作検証用：URLに ?appcheck=off を付けて開くと、App Check(reCAPTCHA)を
+// 起動せずに立ち上げる。特定端末で固まる原因の切り分けに使う。
+function isAppCheckDisabledByUrl(){
+  try{
+    return new URLSearchParams(window.location.search).get("appcheck") === "off";
+  }catch(e){ return false; }
+}
+
 let db = null;
 let firebaseInitError = null;
 try {
   firebase.initializeApp(firebaseConfig);
-  if (RECAPTCHA_V3_SITE_KEY && RECAPTCHA_V3_SITE_KEY !== "YOUR_RECAPTCHA_V3_SITE_KEY") {
+  if (RECAPTCHA_V3_SITE_KEY && RECAPTCHA_V3_SITE_KEY !== "YOUR_RECAPTCHA_V3_SITE_KEY" && !isAppCheckDisabledByUrl()) {
     firebase.appCheck().activate(RECAPTCHA_V3_SITE_KEY, true);
   }
   db = firebase.firestore();
@@ -3404,11 +3412,31 @@ const toggleTheme = () => {
     let unsubChem, unsubWaste, unsubEntries, unsubSettings, unsubLocations;
     let cancelled = false;
 
+    // 特定OS(端末)でApp Check/認証まわりのネットワーク通信が固まり、
+    // 読み込み画面から一切進まなくなる不具合の対策。
+    // 一定時間で強制的にタイムアウトさせ、エラー画面（再読み込み可能）に逃がす。
+    let timeoutId = window.setTimeout(() => {
+      timeoutId = null;
+      if (cancelled) return;
+      console.error("startup timeout: signIn/appCheck等のネットワーク処理が既定時間内に完了しませんでした");
+      setFatalError(
+        "通信に時間がかかっているため起動を中断しました。電波の良い場所で「再読み込み」をお試しください。（この端末・OSのバージョンで発生しやすい既知の症状です）"
+      );
+      setLoading(false);
+    }, 15000);
+    const clearStartupTimeout = () => {
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+    };
+
     ensureSignedIn()
       .then(() => seedIfNeeded())
       .then(() => syncExcelInventoryIfNeeded())
       .then(() => fixEvansBlueFullStatusIfNeeded())
       .then(() => {
+        clearStartupTimeout();
         if (cancelled) return;
         unsubChem = db.collection("chemicals").onSnapshot(
           (snap) => {
@@ -3450,6 +3478,7 @@ const toggleTheme = () => {
         );
       })
       .catch((err) => {
+        clearStartupTimeout();
         console.error("startup failed", err);
         if (!cancelled) {
           setFatalError("起動処理に失敗しました：" + (err.message || String(err)));
@@ -3459,6 +3488,7 @@ const toggleTheme = () => {
 
     return () => {
       cancelled = true;
+      clearStartupTimeout();
       if (unsubChem) unsubChem();
       if (unsubWaste) unsubWaste();
       if (unsubEntries) unsubEntries();
@@ -3801,8 +3831,14 @@ const handleDeleteWasteCategories = (wastes) => {
           </div>
           <div style={{ fontSize: 13, color: C.ink, lineHeight: 1.7, wordBreak: "break-word" }}>{fatalError}</div>
           <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 12, lineHeight: 1.6 }}>
-            多くの場合、Firestoreのセキュリティルールやプロジェクト設定が原因です。ブラウザの開発者ツール（コンソール）にも詳細が出ています。
+            多くの場合、Firestoreのセキュリティルールやプロジェクト設定、または通信状況が原因です。ブラウザの開発者ツール（コンソール）にも詳細が出ています。
           </div>
+          <button
+            onClick={() => window.location.reload()}
+            style={{ marginTop: 14, width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: C.danger, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+          >
+            再読み込み
+          </button>
         </div>
       </div>
     );
