@@ -3421,103 +3421,119 @@ const toggleTheme = () => {
     let unsubChem, unsubWaste, unsubEntries, unsubSettings, unsubLocations;
     let cancelled = false;
 
-    // 特定OS(端末)でApp Check/認証まわりのネットワーク通信が固まり、
-    // 読み込み画面から一切進まなくなる不具合の対策。
-    // 一定時間で強制的にタイムアウトさせ、エラー画面（再読み込み可能）に逃がす。
-    let currentStep = "サインイン中…";
-    const markStep = (label) => { currentStep = label; setLoadingStep(label); };
-
-    let timeoutId = window.setTimeout(() => {
-      timeoutId = null;
-      if (cancelled) return;
-      console.error("startup timeout: 「" + currentStep + "」の段階でネットワーク処理が既定時間内に完了しませんでした");
-      setFatalError(
-        `通信に時間がかかっているため起動を中断しました（「${currentStep}」で停止）。電波の良い場所で「再読み込み」をお試しください。（この端末・OSのバージョンで発生しやすい既知の症状です）`
-      );
-      setLoading(false);
-    }, 15000);
-    const clearStartupTimeout = () => {
-      if (timeoutId) {
-        window.clearTimeout(timeoutId);
-        timeoutId = null;
-      }
+    const unsubAll = () => {
+      if (unsubChem) { unsubChem(); unsubChem = null; }
+      if (unsubWaste) { unsubWaste(); unsubWaste = null; }
+      if (unsubEntries) { unsubEntries(); unsubEntries = null; }
+      if (unsubSettings) { unsubSettings(); unsubSettings = null; }
+      if (unsubLocations) { unsubLocations(); unsubLocations = null; }
     };
 
-    setLoadingStep("サインイン中…");
-    ensureSignedIn()
-      .then(() => {
-        markStep("薬品データ取得中…");
+    // 特定OS(端末)で通信が単発で詰まり、読み込み画面から進まなくなる不具合の対策。
+    // 一定時間で強制タイムアウトさせ、1回だけ裏で自動的に最初からやり直す。
+    // それでもダメならエラー画面（再読み込み可能）に逃がす。
+    function attemptStartup(attempt) {
+      let currentStep = "サインイン中…";
+      const markStep = (label) => { currentStep = label; setLoadingStep(label + (attempt > 1 ? `（${attempt}回目）` : "")); };
+
+      let timeoutId = window.setTimeout(() => {
+        timeoutId = null;
         if (cancelled) return;
+        console.error(`startup timeout(attempt ${attempt}): 「${currentStep}」の段階でネットワーク処理が既定時間内に完了しませんでした`);
+        unsubAll();
+        if (attempt < 2) {
+          // 1回目の失敗は自動で静かにやり直す（この端末で単発の通信詰まりが起きやすいため）
+          attemptStartup(attempt + 1);
+          return;
+        }
+        setFatalError(
+          `通信に時間がかかっているため起動を中断しました（「${currentStep}」で停止／自動再試行後も失敗）。電波の良い場所で「再読み込み」をお試しください。（この端末・OSのバージョンで発生しやすい既知の症状です）`
+        );
+        setLoading(false);
+      }, 15000);
+      const clearStartupTimeout = () => {
+        if (timeoutId) {
+          window.clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+      };
 
-        // seedIfNeeded / syncExcelInventoryIfNeeded / fixEvansBlueFullStatusIfNeeded は
-        // 「まだ完了していなければ一回だけ実行する」移行・初期化用の処理で、
-        // 運用中の環境ではほぼ即return（何もしない）で終わるはずのもの。
-        // 起動のたびにこれらを直列に待つと、途中のFirestore通信が1回でも
-        // 詰まった場合にアプリ全体が起動不能になってしまうため、
-        // 本体の表示（onSnapshot購読）はブロックさせず、裏で試すだけにする。
-        seedIfNeeded()
-          .then(() => syncExcelInventoryIfNeeded())
-          .then(() => fixEvansBlueFullStatusIfNeeded())
-          .catch((err) => console.warn("起動時の初期化/移行チェックに失敗（本体表示には影響なし）:", err));
+      setLoadingStep(currentStep);
+      ensureSignedIn()
+        .then(() => {
+          markStep("薬品データ取得中…");
+          if (cancelled) return;
 
-        unsubChem = db.collection("chemicals").onSnapshot(
-          (snap) => {
-            clearStartupTimeout();
-            setChemicals(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-            setLoading(false);
-          },
-          (err) => {
-            clearStartupTimeout();
-            console.error("chemicals subscription error", err);
-            setFatalError("薬品データの取得に失敗しました：" + err.message);
-            setLoading(false);
-          }
-        );
-        unsubWaste = db.collection("wasteCategories").onSnapshot(
-          (snap) => setWasteMeta(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-          (err) => {
-            console.error("wasteCategories subscription error", err);
-            setFatalError("廃液分類データの取得に失敗しました：" + err.message);
-          }
-        );
-        unsubEntries = db.collection("wasteEntries").onSnapshot(
-          (snap) => setWasteEntriesRaw(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-          (err) => {
-            console.error("wasteEntries subscription error", err);
-            setFatalError("廃液記録データの取得に失敗しました：" + err.message);
-          }
-        );
-        unsubSettings = db.collection("meta").doc("settings").onSnapshot(
-          (snap) => {
-            if (snap.exists && snap.data().passcode) {
-              setAdminPasscode(snap.data().passcode);
+          // seedIfNeeded / syncExcelInventoryIfNeeded / fixEvansBlueFullStatusIfNeeded は
+          // 「まだ完了していなければ一回だけ実行する」移行・初期化用の処理で、
+          // 運用中の環境ではほぼ即return（何もしない）で終わるはずのもの。
+          // 起動のたびにこれらを直列に待つと、途中のFirestore通信が1回でも
+          // 詰まった場合にアプリ全体が起動不能になってしまうため、
+          // 本体の表示（onSnapshot購読）はブロックさせず、裏で試すだけにする。
+          seedIfNeeded()
+            .then(() => syncExcelInventoryIfNeeded())
+            .then(() => fixEvansBlueFullStatusIfNeeded())
+            .catch((err) => console.warn("起動時の初期化/移行チェックに失敗（本体表示には影響なし）:", err));
+
+          unsubChem = db.collection("chemicals").onSnapshot(
+            (snap) => {
+              clearStartupTimeout();
+              setChemicals(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+              setLoading(false);
+            },
+            (err) => {
+              clearStartupTimeout();
+              console.error("chemicals subscription error", err);
+              setFatalError("薬品データの取得に失敗しました：" + err.message);
+              setLoading(false);
             }
-          },
-          (err) => console.error("settings subscription error", err)
-        );
-        // 「場所を追加」で作った、まだ薬品が無い保管場所を保持するコレクション
-        unsubLocations = db.collection("locations").onSnapshot(
-          (snap) => setLocationsMeta(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-          (err) => console.error("locations subscription error", err)
-        );
-      })
-      .catch((err) => {
-        clearStartupTimeout();
-        console.error("startup failed", err);
-        if (!cancelled) {
+          );
+          unsubWaste = db.collection("wasteCategories").onSnapshot(
+            (snap) => setWasteMeta(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+            (err) => {
+              console.error("wasteCategories subscription error", err);
+              setFatalError("廃液分類データの取得に失敗しました：" + err.message);
+            }
+          );
+          unsubEntries = db.collection("wasteEntries").onSnapshot(
+            (snap) => setWasteEntriesRaw(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+            (err) => {
+              console.error("wasteEntries subscription error", err);
+              setFatalError("廃液記録データの取得に失敗しました：" + err.message);
+            }
+          );
+          unsubSettings = db.collection("meta").doc("settings").onSnapshot(
+            (snap) => {
+              if (snap.exists && snap.data().passcode) {
+                setAdminPasscode(snap.data().passcode);
+              }
+            },
+            (err) => console.error("settings subscription error", err)
+          );
+          // 「場所を追加」で作った、まだ薬品が無い保管場所を保持するコレクション
+          unsubLocations = db.collection("locations").onSnapshot(
+            (snap) => setLocationsMeta(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+            (err) => console.error("locations subscription error", err)
+          );
+        })
+        .catch((err) => {
+          clearStartupTimeout();
+          console.error(`startup failed (attempt ${attempt})`, err);
+          if (cancelled) return;
+          if (attempt < 2) {
+            attemptStartup(attempt + 1);
+            return;
+          }
           setFatalError("起動処理に失敗しました：" + (err.message || String(err)));
           setLoading(false);
-        }
-      });
+        });
+    }
+
+    attemptStartup(1);
 
     return () => {
       cancelled = true;
-      clearStartupTimeout();
-      if (unsubChem) unsubChem();
-      if (unsubWaste) unsubWaste();
-      if (unsubEntries) unsubEntries();
-      if (unsubSettings) unsubSettings();
-      if (unsubLocations) unsubLocations();
+      unsubAll();
     };
   }, []);
 
