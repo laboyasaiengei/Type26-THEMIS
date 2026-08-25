@@ -521,6 +521,14 @@ try {
     firebase.appCheck().activate(RECAPTCHA_V3_SITE_KEY, true);
   }
   db = firebase.firestore();
+  // 特定のiOSバージョンで、1回目の通信は成功するが2回目以降のFirestore通信が
+  // 固まる（ストリーミング/コネクション再利用まわりの不具合と思われる）症状への対策。
+  // ロングポーリング方式に切り替えることで回避できる場合がある。
+  try {
+    db.settings({ experimentalAutoDetectLongPolling: true, merge: true });
+  } catch (e) {
+    console.warn("Firestore settings(long polling)適用に失敗:", e);
+  }
 } catch (err) {
   firebaseInitError = err;
   console.error("Firebase init failed", err);
