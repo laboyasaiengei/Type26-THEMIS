@@ -1040,6 +1040,30 @@ function Spinner({ size = 34, color = C.teal }) {
   );
 }
 
+function BenzeneSpinner({ size = 46 }) {
+  const pts = [0, 60, 120, 180, 240, 300].map((deg) => {
+    const rad = (deg * Math.PI) / 180;
+    return [24 + 16 * Math.cos(rad), 24 + 16 * Math.sin(rad)];
+  });
+  const hexPoints = pts.map((p) => p.join(",")).join(" ");
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" style={{ animation: "spin 2.2s linear infinite" }}>
+      <polygon points={hexPoints} fill="none" stroke={C.tealDeep} strokeWidth="2.2" strokeLinejoin="round" />
+      {[0, 2, 4].map((i) => {
+        const [x1, y1] = pts[i];
+        const [x2, y2] = pts[(i + 1) % 6];
+        const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+        const cx = 24, cy = 24;
+        const ix1 = mx + (x1 - mx) * 0.25, iy1 = my + (y1 - my) * 0.25;
+        const ix2 = mx + (x2 - mx) * 0.25, iy2 = my + (y2 - my) * 0.25;
+        const dx1 = ix1 + (cx - ix1) * 0.18, dy1 = iy1 + (cy - iy1) * 0.18;
+        const dx2 = ix2 + (cx - ix2) * 0.18, dy2 = iy2 + (cy - iy2) * 0.18;
+        return <line key={i} x1={dx1} y1={dy1} x2={dx2} y2={dy2} stroke={C.teal} strokeWidth="2" />;
+      })}
+    </svg>
+  );
+}
+
 function HazardStripe({ height = 6 }) {
   return (
     <div
@@ -3808,11 +3832,12 @@ const handleDeleteWasteCategories = (wastes) => {
     );
   }
 
-  if (loading) {
+    if (loading) {
     return (
-      <div style={{ fontFamily: "'Inter', sans-serif", background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14 }}>
+      <div style={{ fontFamily: "'Inter', sans-serif", background: C.bg, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10 }}>
         <style>{FONT_IMPORT}</style>
-        <Spinner />
+        <BenzeneSpinner />
+        <div style={{ fontWeight: 800, fontSize: 15, letterSpacing: "0.06em", color: C.tealDeep, marginTop: 4 }}>THEMIS</div>
         <div style={{ color: C.inkSoft, fontSize: 13 }}>読み込み中…</div>
       </div>
     );
