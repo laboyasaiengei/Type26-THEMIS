@@ -525,7 +525,7 @@ try {
   // 固まる（ストリーミング/コネクション再利用まわりの不具合と思われる）症状への対策。
   // ロングポーリング方式に切り替えることで回避できる場合がある。
   try {
-    db.settings({ experimentalAutoDetectLongPolling: true, merge: true });
+  db.settings({ experimentalForceLongPolling: true, merge: true });
   } catch (e) {
     console.warn("Firestore settings(long polling)適用に失敗:", e);
   }
@@ -3445,13 +3445,22 @@ const toggleTheme = () => {
 
     setLoadingStep("サインイン中…");
     ensureSignedIn()
-      .then(() => { markStep("初期データ確認中…"); return seedIfNeeded(); })
-      .then(() => { markStep("在庫Excel同期確認中…"); return syncExcelInventoryIfNeeded(); })
-      .then(() => { markStep("データ整合性チェック中…"); return fixEvansBlueFullStatusIfNeeded(); })
       .then(() => {
         markStep("薬品データ取得中…");
         clearStartupTimeout();
         if (cancelled) return;
+
+        // seedIfNeeded / syncExcelInventoryIfNeeded / fixEvansBlueFullStatusIfNeeded は
+        // 「まだ完了していなければ一回だけ実行する」移行・初期化用の処理で、
+        // 運用中の環境ではほぼ即return（何もしない）で終わるはずのもの。
+        // 起動のたびにこれらを直列に待つと、途中のFirestore通信が1回でも
+        // 詰まった場合にアプリ全体が起動不能になってしまうため、
+        // 本体の表示（onSnapshot購読）はブロックさせず、裏で試すだけにする。
+        seedIfNeeded()
+          .then(() => syncExcelInventoryIfNeeded())
+          .then(() => fixEvansBlueFullStatusIfNeeded())
+          .catch((err) => console.warn("起動時の初期化/移行チェックに失敗（本体表示には影響なし）:", err));
+
         unsubChem = db.collection("chemicals").onSnapshot(
           (snap) => {
             setChemicals(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
