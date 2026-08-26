@@ -946,8 +946,9 @@ async function fixEvansBlueFullStatusIfNeeded() {
 /* ------------------------------------------------------------------ */
 
 const BACKUP_BATCH_SIZE = 400; // Firestoreの1バッチ上限(500)よりやや余裕を持たせる
-const MAX_BACKUPS_KEPT = 20; // 自動・手動を合わせて直近何件まで残すか
-const AUTO_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 自動バックアップの最短間隔（1日）
+const MAX_BACKUP_AGE_MS = 5 * 24 * 60 * 60 * 1000; // これより古い自動バックアップは削除する（5日）
+const MAX_BACKUPS_KEPT = 200; // 万が一大量に溜まった場合の安全上限（手動分も含む・自動は上のage基準で先に間引かれる）
+const AUTO_BACKUP_INTERVAL_MS = 60 * 60 * 1000; // 自動バックアップの最短間隔（1時間）
 
 function chunkArray(arr, size) {
   const out = [];
@@ -1010,11 +1011,34 @@ async function createBackupSnapshot(type) {
   return backupRef.id;
 }
 
-// 古いバックアップを MAX_BACKUPS_KEPT 件だけ残して削除する（無制限に増え続けないようにする）
+// 古いバックアップを削除する。
+// 基本方針：MAX_BACKUP_AGE_MS（5日）より古いものは削除。
+// ただし何があっても直近1件は必ず残す。
+// さらに、何らかの理由で件数が異常に膨らんだ場合に備えて MAX_BACKUPS_KEPT を安全上限として併用する。
 async function rotateOldBackups() {
   const snap = await db.collection("backups").orderBy("createdAt", "asc").get();
-  if (snap.docs.length <= MAX_BACKUPS_KEPT) return;
-  const toRemove = snap.docs.slice(0, snap.docs.length - MAX_BACKUPS_KEPT);
+  const docs = snap.docs;
+  if (docs.length <= 1) return;
+
+  const cutoff = Date.now() - MAX_BACKUP_AGE_MS;
+  let toRemove = docs.filter((d) => {
+    const createdAt = d.data().createdAt;
+    const t = createdAt ? new Date(createdAt).getTime() : 0;
+    return t < cutoff;
+  });
+  // 直近1件は消さない（万一すべてが古い場合の保険）
+  const newest = docs[docs.length - 1];
+  toRemove = toRemove.filter((d) => d.id !== newest.id);
+
+  // 年齢基準の削除後もなお件数が安全上限を超える場合は、古い順にさらに間引く
+  const remainingCount = docs.length - toRemove.length;
+  if (remainingCount > MAX_BACKUPS_KEPT) {
+    const removeIds = new Set(toRemove.map((d) => d.id));
+    const survivors = docs.filter((d) => !removeIds.has(d.id));
+    const extraToRemove = survivors.slice(0, survivors.length - MAX_BACKUPS_KEPT);
+    toRemove = toRemove.concat(extraToRemove);
+  }
+
   for (const doc of toRemove) {
     await deleteAllInCollection(doc.ref.collection("chemicals"));
     await deleteAllInCollection(doc.ref.collection("wasteCategories"));
@@ -1024,7 +1048,8 @@ async function rotateOldBackups() {
   }
 }
 
-// 起動のたびに増えすぎないよう、前回の自動バックアップから一定時間経っている時だけ実行する
+// 前回の自動バックアップから一定時間（1時間）経っていれば新しくバックアップを作る。
+// アプリ起動時に加えて、開きっぱなしのセッション中も定期的に呼び出される。
 async function autoBackupIfNeeded() {
   const stateRef = db.collection("meta").doc("backupState");
   const stateSnap = await stateRef.get();
@@ -1794,6 +1819,12 @@ function SearchTab({ chemicals, onSelect, query, setQuery }) {
                   </div>
                   <div style={{ fontSize: 12.5, color: C.ink, marginTop: 6, fontFamily: "'Roboto Mono', monospace", fontWeight: 600 }}>
                     {stockAmountLabel(c.stock)}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+                    <MapPin size={12} color={C.inkSoft} />
+                    <div style={{ fontSize: 12, color: C.inkSoft }}>
+                      {displayLocationName(c.location.name)}{c.subLocation ? `（${c.subLocation}）` : ""}
+                    </div>
                   </div>
                 </div>
                 <AutoStatusBadge statusKey={status} size="small" />
@@ -2633,6 +2664,7 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
 
 function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
   const [formula, setFormula] = useState(chemical.formula || "");
+  const [cas, setCas] = useState(chemical.cas || CAS_LOOKUP[chemical.name] || "");
   const [locationName, setLocationName] = useState(chemical.location?.name || "");
   const [wasteId, setWasteId] = useState(chemical.wasteId || null);
   const [amount, setAmount] = useState(chemical.stock?.known === false ? "" : String(chemical.stock?.amount ?? ""));
@@ -2675,7 +2707,7 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
     const stock = isFull
       ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
       : { amount: Math.max(0, parseFloat(amount)), capacity: 0, unit: "g", known: true };
-    onSave(chemical, { formula: formula.trim(), locationName, subLocation: chemical.subLocation || "", wasteId, stock, purpose: purpose.trim(), openDate: openDate || "" });
+    onSave(chemical, { formula: formula.trim(), cas: cas.trim(), locationName, subLocation: chemical.subLocation || "", wasteId, stock, purpose: purpose.trim(), openDate: openDate || "" });
   };
 
   return (
@@ -2684,6 +2716,17 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
       <div style={{ padding: 16 }}>
         <SectionLabel>分子式（任意）</SectionLabel>
         <input style={{ ...inputStyle, marginBottom: 20, fontFamily: "'Roboto Mono', monospace" }} value={formula} onChange={(e) => setFormula(e.target.value)} placeholder="例：CH3OH（略称でも可）" />
+
+        <SectionLabel>CASナンバー（任意）</SectionLabel>
+        <input
+          style={{ ...inputStyle, marginBottom: 4, fontFamily: "'Roboto Mono', monospace" }}
+          value={cas}
+          onChange={(e) => setCas(e.target.value)}
+          placeholder="例：67-56-1"
+        />
+        <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
+          普段の画面には表示されず、Excelへの書き出し時にのみ使用します
+        </div>
 
         <SectionLabel>保管場所（必須）</SectionLabel>
         <select style={{ ...inputStyle, marginBottom: 20 }} value={locationName} onChange={(e) => setLocationName(e.target.value)}>
@@ -3620,12 +3663,22 @@ function RecordMassPage({ chemical, onBack, onSave }) {
 function AddChemicalPage({ wasteCategories, onBack, onSave }) {
   const [name, setName] = useState("");
   const [formula, setFormula] = useState("");
+  const [cas, setCas] = useState("");
+  const [casTouched, setCasTouched] = useState(false);
   const [locationName, setLocationName] = useState(LOCATION_OPTIONS[0]);
   const [amount, setAmount] = useState("");
   const [isFull, setIsFull] = useState(false);
   const [purpose, setPurpose] = useState("");
   const [wasteId, setWasteId] = useState(null);
   const [openDate, setOpenDate] = useState(""); // 最初から開いている（今開封したわけではない）薬品もあるため、初期状態では自動入力しない
+
+  // 薬品名がExcel台帳の名称と一致する場合、CASナンバーをまだ手入力していなければ自動で候補を入れる
+  // （あとから手動で自由に修正・削除できる）
+  useEffect(() => {
+    if (casTouched) return;
+    const known = CAS_LOOKUP[name.trim()];
+    if (known) setCas(known);
+  }, [name, casTouched]);
 
   // 「重量を記入」＝登録した時点で開封済み、とみなして開封日に今日の日付を自動で入れる
   // （FULLに切り替えた場合は未開封なのでクリアする。どちらも手動で修正可）
@@ -3657,6 +3710,7 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
     onSave({
       name: name.trim(),
       formula: formula.trim(),
+      cas: cas.trim(),
       locationName,
       subLocation: "",
       amount: isFull ? null : parseFloat(amount),
@@ -3678,6 +3732,17 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
         <input style={{ ...inputStyle, marginBottom: 4, fontFamily: "'Roboto Mono', monospace" }} value={formula} onChange={(e) => setFormula(e.target.value)} placeholder="例：CH3OH（略称でも可）" />
         <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 16 }}>
           界面活性剤など略称で呼ぶものは、略称のまま入力してかまいません
+        </div>
+
+        <SectionLabel>CASナンバー（任意）</SectionLabel>
+        <input
+          style={{ ...inputStyle, marginBottom: 4, fontFamily: "'Roboto Mono', monospace" }}
+          value={cas}
+          onChange={(e) => { setCas(e.target.value); setCasTouched(true); }}
+          placeholder="例：67-56-1"
+        />
+        <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 16 }}>
+          普段の画面には表示されず、Excelへの書き出し時にのみ使用します
         </div>
 
         <SectionLabel>保管場所（必須）</SectionLabel>
@@ -3884,7 +3949,7 @@ function RestoreListPage({ onBack, onSelectBackup }) {
           <div style={{ textAlign: "center", padding: "40px 12px", color: C.inkSoft, fontSize: 13, lineHeight: 1.8 }}>
             まだバックアップがありません。
             <br />
-            自動バックアップは1日1回作成されます。
+            自動バックアップは1時間ごとに作成され、直近5日分まで残ります。
           </div>
         )}
 
@@ -4197,6 +4262,16 @@ const toggleTheme = () => {
     };
   }, []);
 
+  // 起動時のチェックだけだと「開きっぱなしのタブ」では次に誰かがアプリを開くまで
+  // バックアップが作られない。AUTO_BACKUP_INTERVAL_MS（1時間）おきにも
+  // チェックし直すことで、長時間開いたままのセッションでも定期的に残るようにする。
+  useEffect(() => {
+    const timer = setInterval(() => {
+      autoBackupIfNeeded().catch((err) => console.warn("定期バックアップチェックに失敗:", err));
+    }, AUTO_BACKUP_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, []);
+
   // wasteCategories（メタ情報）＋wasteEntries（投入記録）を、既存の画面コンポーネントが
   // 期待する「entries を内包したカテゴリ配列」の形に合成する
   const wasteCategories = useMemo(
@@ -4243,7 +4318,7 @@ const toggleTheme = () => {
         return {
           薬品名: c.name,
           分子式: c.formula || "",
-          "CASナンバー": CAS_LOOKUP[c.name] || "",
+          "CASナンバー": (c.cas && c.cas.trim()) || CAS_LOOKUP[c.name] || "",
           保管場所: displayLocationName(c.location?.name || ""),
           場所補足: c.subLocation || "",
           "在庫量(g)": c.stock && c.stock.known !== false ? c.stock.amount : "",
@@ -4270,58 +4345,8 @@ const toggleTheme = () => {
     }
   };
 
-  // データ全体（薬品・廃液分類・投入記録・保管場所・設定）をJSONファイルとして書き出す、
-  // 管理者専用のバックアップ機能。誤操作防止のため、実行前に管理者パスコードの入力を要求する。
-  const handleBackupRequest = () => {
-    setPasscodeGate({
-      title: "管理者確認",
-      message: "バックアップを作成するには、管理者パスコードを入力してください。",
-      onCancel: () => setPasscodeGate(null),
-      onConfirm: () => {
-        setPasscodeGate(null);
-        handleRunBackup();
-      },
-    });
-  };
-
-  const handleRunBackup = async () => {
-    try {
-      // 端末にも1部保存しておく（Firestore側と別に手元に残しておきたい場合の保険）
-      const backup = {
-        backupType: "THEMIS_FULL_BACKUP",
-        exportedAt: new Date().toISOString(),
-        chemicals,
-        wasteCategories: wasteMeta,
-        wasteEntries: wasteEntriesRaw,
-        locations: locationsMeta,
-        settings: { passcode: adminPasscode },
-      };
-      const json = JSON.stringify(backup, null, 2);
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      const today = new Date();
-      const y = today.getFullYear();
-      const m = String(today.getMonth() + 1).padStart(2, "0");
-      const d = String(today.getDate()).padStart(2, "0");
-      const hh = String(today.getHours()).padStart(2, "0");
-      const mi = String(today.getMinutes()).padStart(2, "0");
-      a.href = url;
-      a.download = `THEMIS_backup_${y}${m}${d}_${hh}${mi}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-
-      // アプリ内の「バックアップから復元」に一覧表示されるよう、Firestore側にも保存する
-      await createBackupSnapshot("manual");
-      await rotateOldBackups();
-      showToast("バックアップを作成しました");
-    } catch (e) {
-      toastFail("バックアップの作成", e);
-    }
-  };
-
+  // 復元（管理者専用）：過去のバックアップから内容を選んで復元する。誤操作防止のため、
+  // 実行前に管理者パスコードの入力を要求する。
   const handleRestoreRequest = () => {
     setPasscodeGate({
       title: "管理者確認",
@@ -4356,7 +4381,7 @@ const toggleTheme = () => {
     );
   };
 
-  const handleAddChemical = async ({ name, formula, locationName, subLocation, amount, isFull, purpose, wasteId, openDate }) => {
+  const handleAddChemical = async ({ name, formula, cas, locationName, subLocation, amount, isFull, purpose, wasteId, openDate }) => {
     const location = resolveLocation(locationName);
     const newId = "c_" + Date.now();
     const stock = isFull ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" } : { amount, capacity: 0, unit: "g", known: true };
@@ -4364,14 +4389,15 @@ const toggleTheme = () => {
       await db
         .collection("chemicals")
         .doc(newId)
-        .set({ name, formula: formula || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null, openDate: openDate || "" });
+        .set({ name, formula: formula || "", cas: cas || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null, openDate: openDate || "" });
       goHome("inventory");
     }catch(e){ toastFail("薬品の追加", e); }
   };
 
-  const handleEditChemical = async (chem, { formula, locationName, subLocation, wasteId, stock, purpose, openDate }) => {
+  const handleEditChemical = async (chem, { formula, cas, locationName, subLocation, wasteId, stock, purpose, openDate }) => {
     const updates = {
       formula: formula || "",
+      cas: cas || "",
       location: resolveLocation(locationName || chem.location.name),
       subLocation: subLocation || "",
       wasteId: wasteId || null,
@@ -4649,14 +4675,6 @@ const handleDeleteWasteCategories = (wastes) => {
         style={{ border: "none", background: "rgba(255,255,255,.14)", color: HEADER.text, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 999, padding: 0, flex: "0 0 auto" }}
       >
         <Download size={16} />
-      </button>
-      <button
-        onClick={handleBackupRequest}
-        aria-label="データのバックアップを作成する（管理者のみ）"
-        title="データのバックアップを作成する（管理者のみ）"
-        style={{ border: "none", background: "rgba(255,255,255,.14)", color: HEADER.text, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 999, padding: 0, flex: "0 0 auto" }}
-      >
-        <Save size={16} />
       </button>
       <button
         onClick={handleRestoreRequest}
