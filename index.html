@@ -134,6 +134,7 @@ function Trash2(props) { return (<IconBase {...props}><path d="M3 6h18"/><path d
 function ChevronRight(props) { return (<IconBase {...props}><polyline points="9 18 15 12 9 6"/></IconBase>); }
 function ArrowLeft(props) { return (<IconBase {...props}><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></IconBase>); }
 function Save(props) { return (<IconBase {...props}><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></IconBase>); }
+function RotateCcw(props) { return (<IconBase {...props}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><polyline points="3 3 3 8 8 8"/></IconBase>); }
 function Download(props) { return (<IconBase {...props}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></IconBase>); }
 function AlertTriangle(props) { return (<IconBase {...props}><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></IconBase>); }
 function Package(props) { return (<IconBase {...props}><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></IconBase>); }
@@ -336,6 +337,333 @@ const initialChemicals = [
 
 /* Excel「実験室薬品管理.xlsx」から取り込んだ薬品データ（CAS番号は除外） */
 // excelInventoryData: Firestoreへの初回インポートは完了済みのため、肥大化していたハードコード配列は削除しました。
+
+// Excel「実験室薬品管理.xlsx」の薬品名→CAS番号 対応表（エクスポート時のみ使用。画面には表示しない）
+const CAS_LOOKUP = {
+  "(+)-酒石酸カリウム-水(2/1) (酒石酸カリウム)": "921-53-9",
+  "(+)-酒石酸ナトリウムカリウム四水和物(ロシェル塩)": "6381-59-5",
+  "(±)-アブシジン酸": "14375-45-2",
+  "(±)-ジチオトレイトール (DTT)": "3483-12-3",
+  "0.1mol/l 塩酸": "7647-01-0",
+  "0.5%過よう素酸溶液(PAS染色用)": "10450-60-9",
+  "0.5mol/l 硫酸 (1N 硫酸)": "7664-93-9",
+  "1,1-ジフェニル-2-ピクリルヒドラジルDPPH": "1898-66-4",
+  "1-ケストース": "470-69-9",
+  "1-ナフタレン酢酸": "86-87-3",
+  "1-ナフチル酢酸": "86-87-3",
+  "12モリブド(Ⅵ)りん酸 n水和物 (りんモリブデン酸)": "51429-74-4",
+  "1mol/l ぎ酸アンモニウム溶液": "540-69-2",
+  "2,2',2''-ニトリロトリエタノール(トリエタノールアミン)": "102-71-6",
+  "2,2'-ビピリジル": "366-18-7",
+  "2,2-ジフェニル-1-ピクリルヒドラジル": "1898-66-4",
+  "2,3,5-トリヨード安息香酸": "88-82-4",
+  "2,4,6-Tris(2-pyridyl)-s-triazine TPTZ": "3682-35-7",
+  "2,4,6-トリス（ジメチルアミノメチル)フェノール": "90-72-2",
+  "2,4-ジニトロフェニルヒドラジン": "119-26-6",
+  "2,6-ジ-t-ブチル-4-メチルフェノール(ブチルヒドロキシトルエン)(BHT)": "128-37-0",
+  "2,6-ジクロロインドフェノールナトリウム": "620-45-1",
+  "2-アミノ-2-ヒドロキシメチル-1,3-プロパンジオール,トリス(ヒドロキシメチル)アミノメタン": "77-86-1",
+  "2-チオバルビツール酸": "504-17-6",
+  "2-フェニル-4,4,5,5-テトラメチルイミダゾリン-3-オキシド-1-オキシル": "18390-00--6",
+  "2-ブトキシエタノール": "111-76-2",
+  "2-プロパノール": "67-63-0",
+  "2NA(EDTA・2Na)": "6381-92-6",
+  "2mol/l メタンスルホン酸溶液": "75-75-2",
+  "3,4-ジヒドロキシけい皮酸": "331-39-5",
+  "3-インドール酢酸": "87-51-4",
+  "3-メチル-1-ブタノール イソアミルアルコール": "123-51-3",
+  "3.3mol/L塩化カリウム溶液": "7447-40-7",
+  "4,6-ジヒドロキシ-2-メルカプトピリミジン (2-チオバルビツール酸)": "504-17-6",
+  "4-CPA(パラクロロフェノキシ酢酸）": "122-88-3",
+  "4-アミノ酪酸": "56-12-2",
+  "5-アミノレブリン酸塩酸塩": "5451-09-2",
+  "5-スルホサリチル酸二水和物": "5965-83-3",
+  "5-ブロモ-4-クロロ-3-インドリル-β-D-ガラクトピラノシド": "7240-90-6",
+  "50%ヒドロキシルアミン溶液": "7803-49-8",
+  "6-(N-ベンジルアミノ)プリン": "1214-39-7",
+  "6-ベンジルアデニン": "1214-39-7",
+  "8-キノリノール硫酸塩": "1130-05-8",
+  "Bis-Tris": "6979-37-0",
+  "CBB G-250": "6104-58-1",
+  "D(+)-ラフィノース五水和物(ラフィノース)": "512-69-6",
+  "D(-)-ソルビトール": "50-70-4",
+  "D-(-)-フルクトース": "57-48-7",
+  "DAB Tablet(DAB . 4HCl 10MG/Tablet) (3,3'-ジアミノベンジジン四塩酸塩)": "7411-49-6",
+  "DTNB (5,57-ジチオビス(2-ニトロ安息香酸))": "69-78-3",
+  "GEDTA(EGTA)": "67-42-5",
+  "L(+)-アスコルビン酸": "50-81-7",
+  "L(+)-アルギニン": "74-79-3",
+  "L(+)-イソロイシン": "73-32-5",
+  "L(+)-グルタミン": "56-85-9",
+  "L(+)-酒石酸": "87-69-4",
+  "L(-)-トレオニン": "72-19-5",
+  "L(-)-フェニルアラニン": "63-91-2",
+  "L(-)-プロリン": "147-85-3",
+  "L(-)-リンゴ酸": "97-67-6",
+  "L-2-アミノオキシ-3-フェニルプロピオン酸": "42990-62-5",
+  "L-アスパラギン一水和物": "5794-13-8",
+  "L-アスパラギン酸": "56-84-8",
+  "L-アラニン": "56-41-7",
+  "L-グルタミン酸": "56-86-0",
+  "L-セリン": "56-45-1",
+  "L-バリン": "72-18-4",
+  "L-ヒスチジン": "71-00-1",
+  "L-ヒドロキシプロリン": "51-35-4",
+  "L-メチオニン": "63-68-3",
+  "MCLA": "128322-44-1",
+  "MES": "145224-94-8",
+  "MGK-S": "67-8064-86",
+  "N,N,N',N'-テトラメチル-p-フェニレンジアミン二塩酸塩": "100-22-1",
+  "N,N,N',N'-テトラメチルエチレンジアミン": "110-18-9",
+  "N,N-ジメチルホルムアミド": "68-12-2",
+  "N-(1-ナフチル)フタルアミド酸": "132-66-1",
+  "N-1-ナフチルエチレンジアミン二塩酸塩": "1465-25-4",
+  "N-フェニルアントラニル酸": "91-40-7",
+  "NBT": "298-83-9",
+  "PVPP": "9003-39-8",
+  "XO 3,3'-Bis[N,N-bis(carboxymethyl)-aminomethyl]-o-cresolsulfon-phthalein,disodium salt": "1611-35-4",
+  "myo-イノシトール": "87-89-8",
+  "p-クマル酸": "501-98-4",
+  "p-トルエンスルホン酸一水和物": "6192-52-5",
+  "t-ブチルアルコール": "75-65-0",
+  "trans-けい皮酸": "140-10-3",
+  "α-アミノイソ酪酸": "62-57-7",
+  "β-NADPH": "2646-71-7",
+  "ぎ酸": "64-18-6",
+  "ぎ酸ナトリウム": "141-53-7",
+  "くえん酸三ナトリウム二水和物": "6132-04-3",
+  "ほう酸": "10043-35-3",
+  "ほう酸塩pH標準液": "1330-43-4",
+  "りん酸": "7664-38-2",
+  "りん酸二アンモニウム": "7783-28-0",
+  "りん酸二水素アンモニウム": "7722-76-1",
+  "りん酸二水素カリウム": "7778-77-0",
+  "りん酸二水素ナトリウム(無水)": "7558-79-4",
+  "りん酸二水素ナトリウム二水和物": "13472-35-0",
+  "りん酸水素二アンモニウム": "7783-28-0",
+  "りん酸水素二カリウム": "7758-11-4",
+  "りん酸水素二ナトリウム": "7558-79-4",
+  "りん酸水素二ナトリウム12水和物": "10039-32-4",
+  "アガロース": "9012-36-6",
+  "アスコルビン酸": "50-81-7",
+  "アセチルアセトン": "123-54-6",
+  "アセトカルミン溶液": "64-19-7",
+  "アセトカーミン溶液": "64-19-7",
+  "アニリンブルー、水溶液": "28983-56-4",
+  "アミノフェニルフルオレシン": "15499-84-0",
+  "アミラーゼ": "9000-90-2",
+  "アミログルコシダーゼ": "9032-08-0",
+  "アラナップ": "132-66-1",
+  "アリザリンエローR": "1718-34-9",
+  "アルブミン": "9048-46-8",
+  "アントロン": "90-44-8",
+  "アンピシリンナトリウム": "69-52-3",
+  "イソチオシアン酸アリル": "57-06-7",
+  "イソチオシアン酸フェニル": "103-72-0",
+  "イソプロピル-β-D(-)-チオガラクトピラノシド": "367-93-1",
+  "イミダゾール": "288-32-4",
+  "インドフェノール": "500-85-6",
+  "インドール酪酸": "133-32-4",
+  "エタノール": "64-17-5",
+  "エチレンジアミン-N,N,N',N'-四酢酸鉄(III)ナトリウム塩三水和物": "15708-41-5",
+  "エチレンジアミン-N,N,N',N'-四酢酸鉄(III)ナトリウム塩三水和物 Fe(Ⅲ)-EDTA": "15708-41-5",
+  "エバンスブルー": "314-13-6",
+  "エポキシ樹脂": "61788-97-4",
+  "エリトロシン": "568-63-8",
+  "オーラミン塩酸塩": "2465-27-2",
+  "カゼイン(bovine milk)": "9000-71-9",
+  "カタラーゼ": "9001-05-2",
+  "カナマイシン硫酸塩": "25389-94-0",
+  "カフェイン(無水)": "58-08-2",
+  "カルベニシリン二ナトリウム": "4800-94-6",
+  "ガンボーグビタミン溶液": "89-3084-70",
+  "キサンチン": "69-89-6",
+  "キサンチンオキシダーゼ from bovine milk XOD": "9002-17-9",
+  "キトサン": "9012-76-4",
+  "キネチン": "525-79-1",
+  "キネチン 6-フルフリルアミノプリン": "525-79-1",
+  "クエン酸一水和物": "5949-29-1",
+  "クルクミン": "458-37-7",
+  "クロロゲン酸 0.5水和物": "6001-76-9",
+  "グアニジン塩酸塩(塩酸グアニジン)": "50-01-1",
+  "グリシン": "56-40-6",
+  "グリシン(アミノ酢酸)": "56-40-6",
+  "グリセリン": "56-81-5",
+  "グルタチオン (還元型)": "70-18-8",
+  "グルタルアルデヒド": "111-30-8",
+  "ケイ酸カルシウム": "10101-39-0",
+  "ケイ酸ナトリウム": "1344-09-8",
+  "コハク酸": "110-15-6",
+  "サフラニン": "477-73-6",
+  "サリチル酸": "69-72-7",
+  "シアナミド": "420-04-2",
+  "シリカゲル": "112926-00-8",
+  "ジエチルピロカルボナート": "1609-47-8",
+  "ジベレリン": "77-06-5",
+  "ジベレリンA3": "77-06-5",
+  "ジベレリンA4": "468-44-0",
+  "ジメチルスルホキシド": "67-68-5",
+  "スクロース": "57-50-1",
+  "スタキオース": "470-55-3",
+  "スタキオースn水和物": "54261-98-2",
+  "スダンⅣ": "85-83-6",
+  "スルファニルアミド": "63-74-1",
+  "ゼラチン": "9000-70-8",
+  "ソルビタン脂肪酸エステル70%、": "ポリオキシエチレン樹脂酸エステル5.5%、",
+  "タイロン　抗酸化剤": "149-45-1",
+  "タングステン(Ⅵ)酸ナトリウム二水和物": "10213-10-2",
+  "チアミン塩酸塩": "67-03-8",
+  "チオ尿素": "62-56-6",
+  "チオ硫酸ナトリウム五水和物": "10102-17-7",
+  "チタンイエロー溶液": "1829-00-1",
+  "テクノビット7100": "88507-29-3",
+  "テトラフェニルほう酸ナトリウム": "143-66-8",
+  "テレフタル酸二ナトリウム": "10028-70-3",
+  "デンプン": "9005-25-8",
+  "トリエタノールアミン塩酸塩": "637-39-8",
+  "トリエチルアミン": "121-44-8",
+  "トリス(ヒドロキシメチル)アミノメタン": "77-86-1",
+  "トリトン": "9002-93-1",
+  "トルイジンブルーO": "6586-04-5",
+  "トロロックス": "53188-07-1",
+  "ドデシル硫酸ナトリウム(SDS)": "151-21-3",
+  "ドデセニルこはく酸無水物": "25377-73-5",
+  "ニコチン酸": "59-67-6",
+  "ニトロブルーテトラゾリウム": "298-83-9",
+  "ニトロブルーテトラゾリウム クロリド": "298-83-9",
+  "ニフェジピン": "21829-25-4",
+  "ニンヒドリン": "485-47-2",
+  "ハイドロサルファイトナトリウム": "7775-14-6",
+  "バソフェナントロリンジスルホン酸二ナトリウム": "98645-86-4",
+  "バナジン(Ⅴ)酸アンモニウム (メタバナジン酸アンモニウム)": "7803-55-6",
+  "パクロブトラゾール": "76738-62-0",
+  "ヒドロキシフェニルフルオレセイン": "359010-69-8",
+  "ヒドロキノン(1,4-ベンゼンジオール)": "123-31-9",
+  "ビス(りん酸二水素)カルシウム一水和物 りん酸二水素カルシウム一水和物": "10031-30-8",
+  "ピリドキシン塩酸塩": "58-56-0",
+  "ファストグリーンFCF": "2353-45-9",
+  "フェノール,結晶": "108-95-2",
+  "フタル酸塩pH標準液": "877-24-7",
+  "フッ化ナトリウム": "7681-49-4",
+  "フマル酸": "110-17-8",
+  "フルリドン (1-メチル-3-トリフルオロメチルフェニル)-5-フェニルピリジン)": "59756-60-4",
+  "ブドウ糖(無水)": "50-99-7",
+  "ブロモクレゾールパープル": "115-40-2",
+  "ブロモフェノールブルー": "115-39-9",
+  "プロテナーゼK": "39450-01-6",
+  "プロピオン酸": "79-09-4",
+  "プロヘキサジオンカルシウム塩 (カルシウム=3-オキシド-5-オキソ- 4-プロピオニルシクロヘキサ-3-エンカルボキシラート)": "127277-53-6",
+  "ヘパリンナトリウム": "9041-08-1",
+  "ベタイン": "107-43-7",
+  "ペンタシアノニトロシル鉄(Ⅲ)酸ナトリウム二水和物 (ニトロプルシドナトリウム二水和物)": "13755-38-9",
+  "ホルクロルフェニュロン (1-(2-クロロ-4-ピリジル)-3-フェニル尿素)": "68157-60-8",
+  "ホルムアミド": "75-12-7",
+  "ポリエチレングリコール 20,000": "25322-68-3",
+  "ポリエチレングリコール4,000": "25322-68-3",
+  "ポリオキシエチレン(10)オクチルフェニルエーテル": "9002-93-1",
+  "ポリオキシエチレン(20)ソルビタンモノラウレート(Tween20相当品)": "9005-64-5",
+  "ポリオキシエチレンドデシルエーテル78.0%、9002-92-0": "ポリオキシエチレン=アルキルエーテル(PRTR・1種)54.0%、",
+  "ポリオキシエチレンヘキシタン脂肪酸エステル50.0%、": "イソプロピルアルコール20~30% 67-63-0",
+  "ポリオキシエチレン脂肪酸エステル24.0%、": "アルカノール(炭素数が10のものに限る)40%",
+  "マルトース一水和物(麦芽糖)": "6363-53-7",
+  "マレイン酸": "110-16-7",
+  "メタりん酸、塊状": "37267-86-0",
+  "メチルオレンジ": "547-58-0",
+  "メチルナジック酸無水物": "25134-21-8",
+  "メチルレッド": "493-52-7",
+  "メチレンブルー(メチレンブルー三水和物)": "7220-79-3",
+  "モリブデン酸ナトリウム二水和物": "10102-40-6",
+  "モレキュラーシーブ": "70955-01-0",
+  "モレキュラーシーブ3A1/16": "1318-02-1",
+  "ヨウ化カリウム": "7681-11-0",
+  "ヨウ化カリウム、エタノール": "7681-11-0, 64-17-5",
+  "ヨウ化プロピジウム": "25535-16-4",
+  "ライトグリーンSF": "5141-20-8",
+  "ラクトース一水和物": "5989-81-1",
+  "リボフラビン": "83-88-5",
+  "ルミノール(3-アミノフタルヒドラジド)": "521-31-3",
+  "レソルシノール (レゾルシン)": "108-46-3",
+  "ローダミン6G": "989-38-8",
+  "ローダミンB": "81-88-9",
+  "ワセリン": "8009-03-8",
+  "七モリブデン酸六アンモニウム四水和物": "12054-85-2",
+  "中性りん酸塩pH標準液": "7778-77-0",
+  "乳酸": "50-21-5",
+  "二塩化メチレン": "75-09-2",
+  "二酢酸フルオレセイン": "596-09-8",
+  "亜硝酸ナトリウム": "7632-00-0",
+  "亜硫酸ナトリウム(無水)": "7757-83-7",
+  "四ほう酸ナトリウム十水和物": "1303-96-4",
+  "四酸化オスミウム": "20816-12-0",
+  "塩化2,3,5-トリフェニルテトラゾリウム": "298-96-4",
+  "塩化アンモニウム": "12125-02-9",
+  "塩化カリウム": "7747-40-7",
+  "塩化カルシウム(無水)": "10043-52-4",
+  "塩化カルシウム二水和物": "10035-04-8",
+  "塩化コバルト(Ⅱ)六水和物": "7791-13-1",
+  "塩化ジフェニルヨードニウム": "1483-72-3",
+  "塩化ストロンチウム六水和物": "10025-70-4",
+  "塩化ナトリウム": "7647-14-5",
+  "塩化ニッケル(Ⅱ)六水和物": "7791-20-2",
+  "塩化ベンジル": "100-44-7",
+  "塩化マグネシウム六水和物": "7791-18-6",
+  "塩化マンガン(Ⅱ)四水和物": "13446-34-9",
+  "塩化ランタン七水和物": "10025-84-0",
+  "塩化リチウム(無水)": "7447-41-8",
+  "塩化鉄(Ⅲ)六水和物 (塩化第二鉄)": "10025-77-1",
+  "塩化銅(Ⅱ)": "7447-39-4",
+  "寒天": "9002-18-0",
+  "抱水クロラール": "302-17-0",
+  "既成ポリアクリルアミドゲル e・パジェルHR": "9003-05-8",
+  "既成ポリアクリルアミドゲル p・パジェル": "9003-05-8",
+  "次亜塩素酸ナトリウム": "7681-52-9",
+  "水酸化ナトリウム": "1310-73-2",
+  "水酸化ナトリウム 1310-73-2、": "硫酸亜鉛 7733-02-0",
+  "没食子酸一水和物": "5995-86-8",
+  "活性炭素": "7440-44-0",
+  "炭酸アンモニウム": "506-87-6",
+  "炭酸カリウム(無水)": "584-08-7",
+  "炭酸カルシウム": "471-34-1",
+  "炭酸ナトリウム(無水)": "497-19-8",
+  "炭酸水素カリウム": "298-14-6",
+  "炭酸水素ナトリウム": "144-55-8",
+  "無水酢酸": "108-24-7",
+  "石英砂": "14808-60-7",
+  "硝酸アンモニウム": "6484-52-2",
+  "硝酸ナトリウム": "7631-99-4",
+  "硝酸ニッケル(Ⅱ)": "13138-45-9",
+  "硝酸マグネシウム": "13446-18-9",
+  "硝酸マグネシウム六水和物": "13446-18-9",
+  "硝酸マンガン(Ⅱ）": "10377-66-9",
+  "硝酸亜鉛": "7779-88-6",
+  "硝酸鉄(Ⅲ)": "10421-48-4",
+  "硝酸銀": "7761-88-8",
+  "硝酸銅(Ⅱ)": "3251-23-8",
+  "硫酸アルミニウム (無水)": "10043-01-3",
+  "硫酸アルミニウムカリウム(カリウムミョウバン)": "7784-24-9",
+  "硫酸アンモニウム": "7783-20-2",
+  "硫酸アンモニウム鉄(Ⅱ)六水和物(モール塩)": "7783-85-9",
+  "硫酸カリウム": "7778-80-5",
+  "硫酸ナトリウム": "7757-82-6",
+  "硫酸マグネシウム": "7487-88-9",
+  "硫酸マグネシウム七水和物": "10034-99-8",
+  "硫酸マンガン(Ⅱ),脱水": "7785-87-7",
+  "硫酸鉄(Ⅱ)七水和物": "7782-63-0",
+  "硫酸銅(Ⅱ)": "7758-98-7",
+  "臭化エチジウム水溶液": "1239-45-8",
+  "臭化カリウム": "7758-02-3",
+  "臭化カルシウム": "7789-41-5",
+  "過塩素酸 (60%)": "7601-90-3",
+  "酢酸": "64-19-7",
+  "酢酸アンモニウム": "631-61-8",
+  "酢酸カリウム": "127-08-2",
+  "酢酸ナトリウム(無水)": "127-09-3",
+  "酢酸ナトリウム三水和物": "6131-90-4",
+  "酸化カルシウム(生石灰)": "1305-78-8",
+  "Ｌ-システイン": "52-90-4",
+  "Ｌ－ロイシン": "61-90-5",
+};
+
 
 // entry: { id, date(YYYY-MM-DD), personName, substanceName, concentrationGL, volumeMl }
 // トータル濃度・トータル使用量は「同じ substanceName の entry 同士」でのみ集計する
@@ -608,6 +936,143 @@ async function fixEvansBlueFullStatusIfNeeded() {
   if (snap.exists && snap.data().stock && snap.data().stock.known === false && snap.data().stock.status !== "full") {
     await ref.update({ "stock.status": "full" });
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  バックアップ／復元                                                   */
+/*  「backups」コレクション配下に、実行時点の chemicals / wasteCategories /  */
+/*  wasteEntries / locations / 設定 をまるごとコピーしたサブコレクションを作る。*/
+/*  復元時はこれらを読み戻し、本体のコレクションを全削除してから書き戻す。       */
+/* ------------------------------------------------------------------ */
+
+const BACKUP_BATCH_SIZE = 400; // Firestoreの1バッチ上限(500)よりやや余裕を持たせる
+const MAX_BACKUPS_KEPT = 20; // 自動・手動を合わせて直近何件まで残すか
+const AUTO_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 自動バックアップの最短間隔（1日）
+
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+// 「batchに1件積む処理」の配列を、上限件数ごとに分けて順番にcommitする
+async function commitOpsInChunks(ops) {
+  const chunks = chunkArray(ops, BACKUP_BATCH_SIZE);
+  for (const chunk of chunks) {
+    const batch = db.batch();
+    chunk.forEach((apply) => apply(batch));
+    await batch.commit();
+  }
+}
+
+// 取得済みのQuerySnapshotの内容を、そのままの id で別のコレクションに複製する
+async function copyDocsInto(sourceDocs, targetCollectionRef) {
+  const ops = sourceDocs.map((d) => (batch) => batch.set(targetCollectionRef.doc(d.id), d.data()));
+  await commitOpsInChunks(ops);
+}
+
+// 指定コレクションの中身を全件削除する（サブコレクション・本体どちらにも使う）
+async function deleteAllInCollection(collectionRef) {
+  const snap = await collectionRef.get();
+  const ops = snap.docs.map((d) => (batch) => batch.delete(d.ref));
+  await commitOpsInChunks(ops);
+}
+
+// 現在のデータ一式をスナップショットとして「backups」コレクションへ保存する。
+// type: "auto"（自動・1日1回）｜ "manual"（管理者が手動で作成）
+async function createBackupSnapshot(type) {
+  const [chemSnap, wasteSnap, entriesSnap, locSnap, settingsSnap] = await Promise.all([
+    db.collection("chemicals").get(),
+    db.collection("wasteCategories").get(),
+    db.collection("wasteEntries").get(),
+    db.collection("locations").get(),
+    db.collection("meta").doc("settings").get(),
+  ]);
+
+  const backupRef = db.collection("backups").doc();
+  await backupRef.set({
+    createdAt: new Date().toISOString(),
+    type,
+    counts: {
+      chemicals: chemSnap.size,
+      wasteCategories: wasteSnap.size,
+      wasteEntries: entriesSnap.size,
+      locations: locSnap.size,
+    },
+    settings: settingsSnap.exists ? settingsSnap.data() : {},
+  });
+
+  await copyDocsInto(chemSnap.docs, backupRef.collection("chemicals"));
+  await copyDocsInto(wasteSnap.docs, backupRef.collection("wasteCategories"));
+  await copyDocsInto(entriesSnap.docs, backupRef.collection("wasteEntries"));
+  await copyDocsInto(locSnap.docs, backupRef.collection("locations"));
+
+  return backupRef.id;
+}
+
+// 古いバックアップを MAX_BACKUPS_KEPT 件だけ残して削除する（無制限に増え続けないようにする）
+async function rotateOldBackups() {
+  const snap = await db.collection("backups").orderBy("createdAt", "asc").get();
+  if (snap.docs.length <= MAX_BACKUPS_KEPT) return;
+  const toRemove = snap.docs.slice(0, snap.docs.length - MAX_BACKUPS_KEPT);
+  for (const doc of toRemove) {
+    await deleteAllInCollection(doc.ref.collection("chemicals"));
+    await deleteAllInCollection(doc.ref.collection("wasteCategories"));
+    await deleteAllInCollection(doc.ref.collection("wasteEntries"));
+    await deleteAllInCollection(doc.ref.collection("locations"));
+    await doc.ref.delete();
+  }
+}
+
+// 起動のたびに増えすぎないよう、前回の自動バックアップから一定時間経っている時だけ実行する
+async function autoBackupIfNeeded() {
+  const stateRef = db.collection("meta").doc("backupState");
+  const stateSnap = await stateRef.get();
+  const last = stateSnap.exists ? stateSnap.data().lastAutoBackupAt : null;
+  if (last && Date.now() - new Date(last).getTime() < AUTO_BACKUP_INTERVAL_MS) return;
+  await createBackupSnapshot("auto");
+  await stateRef.set({ lastAutoBackupAt: new Date().toISOString() }, { merge: true });
+  await rotateOldBackups();
+}
+
+// 指定したバックアップの内容で、現在のデータを完全に置き換える（元に戻せない操作）
+async function restoreFromBackup(backupId) {
+  const backupRef = db.collection("backups").doc(backupId);
+  const [backupDoc, chemSnap, wasteSnap, entriesSnap, locSnap] = await Promise.all([
+    backupRef.get(),
+    backupRef.collection("chemicals").get(),
+    backupRef.collection("wasteCategories").get(),
+    backupRef.collection("wasteEntries").get(),
+    backupRef.collection("locations").get(),
+  ]);
+  if (!backupDoc.exists) throw new Error("指定されたバックアップが見つかりません");
+
+  await deleteAllInCollection(db.collection("chemicals"));
+  await deleteAllInCollection(db.collection("wasteCategories"));
+  await deleteAllInCollection(db.collection("wasteEntries"));
+  await deleteAllInCollection(db.collection("locations"));
+
+  await copyDocsInto(chemSnap.docs, db.collection("chemicals"));
+  await copyDocsInto(wasteSnap.docs, db.collection("wasteCategories"));
+  await copyDocsInto(entriesSnap.docs, db.collection("wasteEntries"));
+  await copyDocsInto(locSnap.docs, db.collection("locations"));
+
+  const settings = backupDoc.data().settings;
+  if (settings && settings.passcode) {
+    await db.collection("meta").doc("settings").set({ passcode: settings.passcode }, { merge: true });
+  }
+}
+
+// バックアップの日時をアプリ内表示用に整形する
+function formatBackupDate(iso) {
+  const d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d.getTime())) return "日時不明";
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${y}/${m}/${day} ${hh}:${mi}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1537,11 +2002,13 @@ function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
     return map;
   }, [chemicals]);
 
-  // 在庫量（重量）または保管場所のどちらかが未登録の薬品を対象にする
+  // 在庫量（重量）または保管場所のどちらかが未登録の薬品を対象にする。
+  // ただし「FULL（未開封）」は重量こそ未計測だが状態としては登録済み（既知）なので、
+  // known===false であっても status が "full" の場合はここでの「未登録」には含めない。
   const unregistered = useMemo(
     () =>
       chemicals
-        .filter((c) => c.stock?.known === false || isLocationUnregistered(c.location))
+        .filter((c) => (c.stock?.known === false && c.stock?.status !== "full") || isLocationUnregistered(c.location))
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
     [chemicals]
   );
@@ -1573,7 +2040,7 @@ function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {pageItems.map((c) => {
           const status = autoStatus(c.stock);
-          const stockKnown = c.stock?.known !== false;
+          const stockKnown = c.stock?.known !== false || c.stock?.status === "full";
           const locationUnregistered = isLocationUnregistered(c.location);
           const hasNoOtherStock = (nameCounts.get(c.name) || 0) <= 1;
           return (
@@ -3374,6 +3841,198 @@ const TABS = [
   { key: "waste", label: "廃液", icon: Trash2 },
 ];
 
+/* ------------------------------------------------------------------ */
+/*  バックアップからの復元：一覧ページ                                     */
+/* ------------------------------------------------------------------ */
+
+function RestoreListPage({ onBack, onSelectBackup }) {
+  const [backups, setBackups] = useState(null); // null = 読み込み中
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const unsub = db.collection("backups").orderBy("createdAt", "desc").onSnapshot(
+      (snap) => setBackups(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => {
+        console.error("backups subscription error", err);
+        setError(err);
+      }
+    );
+    return () => unsub();
+  }, []);
+
+  return (
+    <div>
+      <TopBar title="バックアップから復元" onBack={onBack} />
+      <div style={{ padding: 16, paddingBottom: 60 }}>
+        <div style={{ fontSize: 12, color: C.inkSoft, lineHeight: 1.7, marginBottom: 14, background: C.lockBg, borderRadius: 10, padding: "10px 12px" }}>
+          復元すると、選択した時点の内容で現在のデータがすべて置き換わります。一覧から内容を確認してから実行してください。
+        </div>
+
+        {backups === null && !error && (
+          <div style={{ textAlign: "center", padding: "40px 0" }}>
+            <Spinner />
+          </div>
+        )}
+
+        {error && (
+          <div style={{ textAlign: "center", padding: "30px 12px", color: C.danger, fontSize: 13 }}>
+            バックアップ一覧の取得に失敗しました。
+          </div>
+        )}
+
+        {backups && backups.length === 0 && (
+          <div style={{ textAlign: "center", padding: "40px 12px", color: C.inkSoft, fontSize: 13, lineHeight: 1.8 }}>
+            まだバックアップがありません。
+            <br />
+            自動バックアップは1日1回作成されます。
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {backups &&
+            backups.map((b) => (
+              <button
+                key={b.id}
+                onClick={() => onSelectBackup(b.id)}
+                style={{ textAlign: "left", background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "13px 14px", cursor: "pointer", display: "flex", alignItems: "center", gap: 10 }}
+              >
+                <Calendar size={16} color={C.inkSoft} style={{ flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13.5, color: C.ink }}>{formatBackupDate(b.createdAt)}</div>
+                  <div style={{ fontSize: 11.5, color: C.inkSoft, marginTop: 3 }}>
+                    {b.type === "auto" ? "自動バックアップ" : "手動バックアップ"}
+                    {b.counts ? ` ・ 薬品${b.counts.chemicals ?? 0}件`: ""}
+                  </div>
+                </div>
+                <ChevronRight size={16} color={C.inkSoft} />
+              </button>
+            ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  バックアップからの復元：内容プレビュー＆実行ページ                       */
+/* ------------------------------------------------------------------ */
+
+function RestoreBackupPreviewPage({ backupId, onBack, onRestore }) {
+  const [detail, setDetail] = useState(null);
+  const [error, setError] = useState(null);
+  const [restoring, setRestoring] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const backupRef = db.collection("backups").doc(backupId);
+        const [metaSnap, chemSnap] = await Promise.all([
+          backupRef.get(),
+          backupRef.collection("chemicals").limit(12).get(),
+        ]);
+        if (cancelled) return;
+        if (!metaSnap.exists) {
+          setError("このバックアップは見つかりませんでした。");
+          return;
+        }
+        setDetail({
+          meta: metaSnap.data(),
+          previewNames: chemSnap.docs.map((d) => d.data().name).filter(Boolean),
+        });
+      } catch (e) {
+        console.error("backup preview fetch error", e);
+        if (!cancelled) setError("バックアップの内容を取得できませんでした。");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [backupId]);
+
+  const handleConfirmRestore = () => {
+    if (typeof window !== "undefined" && window.confirm) {
+      const ok = window.confirm(
+        "この内容で復元します。現在の薬品・廃液分類・保管場所などのデータはすべて上書きされ、元に戻せません。本当によろしいですか？"
+      );
+      if (!ok) return;
+    }
+    setRestoring(true);
+    onRestore(backupId).finally(() => setRestoring(false));
+  };
+
+  return (
+    <div>
+      <TopBar title="復元内容の確認" onBack={onBack} />
+      <div style={{ padding: 16, paddingBottom: 100 }}>
+        {!detail && !error && (
+          <div style={{ textAlign: "center", padding: "40px 0" }}>
+            <Spinner />
+          </div>
+        )}
+
+        {error && <div style={{ textAlign: "center", padding: "30px 12px", color: C.danger, fontSize: 13 }}>{error}</div>}
+
+        {detail && (
+          <>
+            <div style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "14px 16px", marginBottom: 14 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: C.ink, marginBottom: 8 }}>
+                {formatBackupDate(detail.meta.createdAt)}
+                <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: C.inkSoft }}>
+                  {detail.meta.type === "auto" ? "（自動バックアップ）" : "（手動バックアップ）"}
+                </span>
+              </div>
+              <div style={{ fontSize: 12.5, color: C.inkSoft, lineHeight: 1.9 }}>
+                薬品：{detail.meta.counts?.chemicals ?? 0}件
+                <br />
+                廃液分類：{detail.meta.counts?.wasteCategories ?? 0}件
+                <br />
+                廃液投入記録：{detail.meta.counts?.wasteEntries ?? 0}件
+                <br />
+                保管場所：{detail.meta.counts?.locations ?? 0}件
+              </div>
+            </div>
+
+            {detail.previewNames.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <SectionLabel>薬品プレビュー（一部抜粋）</SectionLabel>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                  {detail.previewNames.map((n, i) => (
+                    <span key={i} style={{ fontSize: 11.5, background: C.lockBg, color: C.ink, borderRadius: 999, padding: "4px 10px" }}>
+                      {n}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: C.dangerBg, border: `1px solid ${C.danger}`, borderRadius: 10, padding: "12px 14px", marginBottom: 20 }}>
+              <AlertTriangle size={16} color={C.danger} style={{ flexShrink: 0, marginTop: 1 }} />
+              <div style={{ fontSize: 12, color: C.ink, lineHeight: 1.7 }}>
+                復元を実行すると、現在の薬品・廃液分類・保管場所などのデータがすべてこの時点の内容に置き換わります。管理者パスコードもこの時点のものに戻ります。この操作は元に戻せません。
+              </div>
+            </div>
+
+            <button
+              onClick={handleConfirmRestore}
+              disabled={restoring}
+              style={{ width: "100%", border: "none", background: restoring ? "#B7C0BC" : C.danger, color: "#fff", fontSize: 14.5, fontWeight: 700, borderRadius: 12, padding: "13px", cursor: restoring ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+            >
+              {restoring ? (
+                "復元しています…"
+              ) : (
+                <>
+                  <RotateCcw size={16} /> この内容で復元する
+                </>
+              )}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ChemStockApp() {
   const [chemicals, setChemicals] = useState([]);
   const [wasteMeta, setWasteMeta] = useState([]);
@@ -3473,6 +4132,7 @@ const toggleTheme = () => {
           seedIfNeeded()
             .then(() => syncExcelInventoryIfNeeded())
             .then(() => fixEvansBlueFullStatusIfNeeded())
+            .then(() => autoBackupIfNeeded())
             .catch((err) => console.warn("起動時の初期化/移行チェックに失敗（本体表示には影響なし）:", err));
 
           unsubChem = db.collection("chemicals").onSnapshot(
@@ -3583,6 +4243,7 @@ const toggleTheme = () => {
         return {
           薬品名: c.name,
           分子式: c.formula || "",
+          "CASナンバー": CAS_LOOKUP[c.name] || "",
           保管場所: displayLocationName(c.location?.name || ""),
           場所補足: c.subLocation || "",
           "在庫量(g)": c.stock && c.stock.known !== false ? c.stock.amount : "",
@@ -3594,7 +4255,7 @@ const toggleTheme = () => {
       });
       const ws = XLSX.utils.json_to_sheet(rows);
       ws["!cols"] = [
-        { wch: 26 }, { wch: 20 }, { wch: 12 }, { wch: 10 },
+        { wch: 26 }, { wch: 20 }, { wch: 14 }, { wch: 12 }, { wch: 10 },
         { wch: 10 }, { wch: 8 }, { wch: 12 }, { wch: 16 }, { wch: 24 },
       ];
       const wb = XLSX.utils.book_new();
@@ -3606,6 +4267,80 @@ const toggleTheme = () => {
       XLSX.writeFile(wb, `薬品一覧_${y}${m}${d}.xlsx`);
     } catch (e) {
       toastFail("薬品一覧のエクスポート", e);
+    }
+  };
+
+  // データ全体（薬品・廃液分類・投入記録・保管場所・設定）をJSONファイルとして書き出す、
+  // 管理者専用のバックアップ機能。誤操作防止のため、実行前に管理者パスコードの入力を要求する。
+  const handleBackupRequest = () => {
+    setPasscodeGate({
+      title: "管理者確認",
+      message: "バックアップを作成するには、管理者パスコードを入力してください。",
+      onCancel: () => setPasscodeGate(null),
+      onConfirm: () => {
+        setPasscodeGate(null);
+        handleRunBackup();
+      },
+    });
+  };
+
+  const handleRunBackup = async () => {
+    try {
+      // 端末にも1部保存しておく（Firestore側と別に手元に残しておきたい場合の保険）
+      const backup = {
+        backupType: "THEMIS_FULL_BACKUP",
+        exportedAt: new Date().toISOString(),
+        chemicals,
+        wasteCategories: wasteMeta,
+        wasteEntries: wasteEntriesRaw,
+        locations: locationsMeta,
+        settings: { passcode: adminPasscode },
+      };
+      const json = JSON.stringify(backup, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const today = new Date();
+      const y = today.getFullYear();
+      const m = String(today.getMonth() + 1).padStart(2, "0");
+      const d = String(today.getDate()).padStart(2, "0");
+      const hh = String(today.getHours()).padStart(2, "0");
+      const mi = String(today.getMinutes()).padStart(2, "0");
+      a.href = url;
+      a.download = `THEMIS_backup_${y}${m}${d}_${hh}${mi}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      // アプリ内の「バックアップから復元」に一覧表示されるよう、Firestore側にも保存する
+      await createBackupSnapshot("manual");
+      await rotateOldBackups();
+      showToast("バックアップを作成しました");
+    } catch (e) {
+      toastFail("バックアップの作成", e);
+    }
+  };
+
+  const handleRestoreRequest = () => {
+    setPasscodeGate({
+      title: "管理者確認",
+      message: "過去のバックアップから復元するには、管理者パスコードを入力してください。",
+      onCancel: () => setPasscodeGate(null),
+      onConfirm: () => {
+        setPasscodeGate(null);
+        push({ view: "restoreList" });
+      },
+    });
+  };
+
+  const handleRunRestore = async (backupId) => {
+    try {
+      await restoreFromBackup(backupId);
+      showToast("バックアップから復元しました");
+      goHome("search");
+    } catch (e) {
+      toastFail("バックアップからの復元", e);
     }
   };
 
@@ -3916,6 +4651,22 @@ const handleDeleteWasteCategories = (wastes) => {
         <Download size={16} />
       </button>
       <button
+        onClick={handleBackupRequest}
+        aria-label="データのバックアップを作成する（管理者のみ）"
+        title="データのバックアップを作成する（管理者のみ）"
+        style={{ border: "none", background: "rgba(255,255,255,.14)", color: HEADER.text, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 999, padding: 0, flex: "0 0 auto" }}
+      >
+        <Save size={16} />
+      </button>
+      <button
+        onClick={handleRestoreRequest}
+        aria-label="バックアップから復元する（管理者のみ）"
+        title="バックアップから復元する（管理者のみ）"
+        style={{ border: "none", background: "rgba(255,255,255,.14)", color: HEADER.text, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 999, padding: 0, flex: "0 0 auto" }}
+      >
+        <RotateCcw size={16} />
+      </button>
+      <button
         onClick={toggleTheme}
         aria-label="ダークモード切替"
         style={{ border: "none", background: "rgba(255,255,255,.14)", color: HEADER.text, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 999, padding: 0, flex: "0 0 auto", fontSize: 14 }}
@@ -4121,6 +4872,17 @@ const handleDeleteWasteCategories = (wastes) => {
 
         {current.view === "changePasscode" && (
           <ChangePasscodePage onBack={pop} onSave={handleSavePasscode} />
+        )}
+
+        {current.view === "restoreList" && (
+          <RestoreListPage
+            onBack={pop}
+            onSelectBackup={(id) => push({ view: "restorePreview", backupId: id })}
+          />
+        )}
+
+        {current.view === "restorePreview" && (
+          <RestoreBackupPreviewPage backupId={current.backupId} onBack={pop} onRestore={handleRunRestore} />
         )}
       </div>
       {passcodeGate && (
