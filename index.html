@@ -862,6 +862,22 @@ try {
   console.error("Firebase init failed", err);
 }
 
+// 指定ms以内にpromiseが解決/拒否しなければ強制的にreject（timeout）する。
+// SafariのIndexedDB実装には、Firestoreが内部で使う通信/永続化処理が
+// 稀に永久にハングする既知の不具合があるため、個々のFirestore呼び出しは
+// すべてこれで包み、一定時間で見切りをつけて呼び出し元の既存のtry/catch
+// （エラートースト表示など）に処理を戻せるようにする。
+function withTimeout(promise, ms, tag) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error(tag || "timeout"), { isTimeout: true })), ms)),
+  ]);
+}
+const FS_OP_TIMEOUT_MS = 8000;
+function withDbTimeout(promise, tag) {
+  return withTimeout(promise, FS_OP_TIMEOUT_MS, tag);
+}
+
 // Firestoreのルールを「ログイン済みのみ許可」にするための最低限のログイン。
 // 画面上にログインUIは出さず、開いたら自動で匿名サインインする。
 function ensureSignedIn() {
@@ -888,7 +904,7 @@ function ensureSignedIn() {
 // 一度seedした後にユーザーが全部削除しても再投入はされない。
 async function seedIfNeeded() {
   const flagRef = db.collection("meta").doc("status");
-  const flagSnap = await flagRef.get();
+  const flagSnap = await withDbTimeout(flagRef.get(), "seed-flag-get-timeout");
   if (flagSnap.exists) return;
 
   const batch = db.batch();
@@ -908,7 +924,7 @@ async function seedIfNeeded() {
   });
 
   batch.set(flagRef, { seeded: true });
-  await batch.commit();
+  await withDbTimeout(batch.commit(), "seed-commit-timeout");
 }
 
 // Excel薬品台帳のFirestoreへの初回インポートは完了済み。
@@ -919,7 +935,7 @@ const EXCEL_IMPORT_VERSION = "2026-08-13-katakana-v5";
 const SYNC_REV = "396"; // internal build tag — do not remove
 async function syncExcelInventoryIfNeeded() {
   const markerRef = db.collection("meta").doc("excelInventoryImport");
-  const markerSnap = await markerRef.get();
+  const markerSnap = await withDbTimeout(markerRef.get(), "excelImportMarker-get-timeout");
   if (markerSnap.exists && markerSnap.data().version === EXCEL_IMPORT_VERSION) return;
 
   console.warn(
@@ -932,9 +948,9 @@ async function syncExcelInventoryIfNeeded() {
 // すでにユーザーが重量を記録済み（known !== false）なら何もしない。
 async function fixEvansBlueFullStatusIfNeeded() {
   const ref = db.collection("chemicals").doc("xl_0127");
-  const snap = await ref.get();
+  const snap = await withDbTimeout(ref.get(), "evansBlue-get-timeout");
   if (snap.exists && snap.data().stock && snap.data().stock.known === false && snap.data().stock.status !== "full") {
-    await ref.update({ "stock.status": "full" });
+    await withDbTimeout(ref.update({ "stock.status": "full" }), "evansBlue-update-timeout");
   }
 }
 
@@ -962,7 +978,7 @@ async function commitOpsInChunks(ops) {
   for (const chunk of chunks) {
     const batch = db.batch();
     chunk.forEach((apply) => apply(batch));
-    await batch.commit();
+    await withDbTimeout(batch.commit(), "backupChunk-commit-timeout");
   }
 }
 
@@ -974,7 +990,7 @@ async function copyDocsInto(sourceDocs, targetCollectionRef) {
 
 // 指定コレクションの中身を全件削除する（サブコレクション・本体どちらにも使う）
 async function deleteAllInCollection(collectionRef) {
-  const snap = await collectionRef.get();
+  const snap = await withDbTimeout(collectionRef.get(), "deleteAllInCollection-get-timeout");
   const ops = snap.docs.map((d) => (batch) => batch.delete(d.ref));
   await commitOpsInChunks(ops);
 }
@@ -983,15 +999,15 @@ async function deleteAllInCollection(collectionRef) {
 // type: "auto"（自動・1日1回）｜ "manual"（管理者が手動で作成）
 async function createBackupSnapshot(type) {
   const [chemSnap, wasteSnap, entriesSnap, locSnap, settingsSnap] = await Promise.all([
-    db.collection("chemicals").get(),
-    db.collection("wasteCategories").get(),
-    db.collection("wasteEntries").get(),
-    db.collection("locations").get(),
-    db.collection("meta").doc("settings").get(),
+    withDbTimeout(db.collection("chemicals").get(), "backupSnapshot-chemicals-get-timeout"),
+    withDbTimeout(db.collection("wasteCategories").get(), "backupSnapshot-wasteCategories-get-timeout"),
+    withDbTimeout(db.collection("wasteEntries").get(), "backupSnapshot-wasteEntries-get-timeout"),
+    withDbTimeout(db.collection("locations").get(), "backupSnapshot-locations-get-timeout"),
+    withDbTimeout(db.collection("meta").doc("settings").get(), "backupSnapshot-settings-get-timeout"),
   ]);
 
   const backupRef = db.collection("backups").doc();
-  await backupRef.set({
+  await withDbTimeout(backupRef.set({
     createdAt: new Date().toISOString(),
     type,
     counts: {
@@ -1001,7 +1017,7 @@ async function createBackupSnapshot(type) {
       locations: locSnap.size,
     },
     settings: settingsSnap.exists ? settingsSnap.data() : {},
-  });
+  }), "backupSnapshot-set-timeout");
 
   await copyDocsInto(chemSnap.docs, backupRef.collection("chemicals"));
   await copyDocsInto(wasteSnap.docs, backupRef.collection("wasteCategories"));
@@ -1016,7 +1032,7 @@ async function createBackupSnapshot(type) {
 // ただし何があっても直近1件は必ず残す。
 // さらに、何らかの理由で件数が異常に膨らんだ場合に備えて MAX_BACKUPS_KEPT を安全上限として併用する。
 async function rotateOldBackups() {
-  const snap = await db.collection("backups").orderBy("createdAt", "asc").get();
+  const snap = await withDbTimeout(db.collection("backups").orderBy("createdAt", "asc").get(), "rotateBackups-get-timeout");
   const docs = snap.docs;
   if (docs.length <= 1) return;
 
@@ -1044,7 +1060,7 @@ async function rotateOldBackups() {
     await deleteAllInCollection(doc.ref.collection("wasteCategories"));
     await deleteAllInCollection(doc.ref.collection("wasteEntries"));
     await deleteAllInCollection(doc.ref.collection("locations"));
-    await doc.ref.delete();
+    await withDbTimeout(doc.ref.delete(), "rotateBackups-delete-timeout");
   }
 }
 
@@ -1052,11 +1068,11 @@ async function rotateOldBackups() {
 // アプリ起動時に加えて、開きっぱなしのセッション中も定期的に呼び出される。
 async function autoBackupIfNeeded() {
   const stateRef = db.collection("meta").doc("backupState");
-  const stateSnap = await stateRef.get();
+  const stateSnap = await withDbTimeout(stateRef.get(), "autoBackupState-get-timeout");
   const last = stateSnap.exists ? stateSnap.data().lastAutoBackupAt : null;
   if (last && Date.now() - new Date(last).getTime() < AUTO_BACKUP_INTERVAL_MS) return;
   await createBackupSnapshot("auto");
-  await stateRef.set({ lastAutoBackupAt: new Date().toISOString() }, { merge: true });
+  await withDbTimeout(stateRef.set({ lastAutoBackupAt: new Date().toISOString() }, { merge: true }), "autoBackupState-set-timeout");
   await rotateOldBackups();
 }
 
@@ -1064,11 +1080,11 @@ async function autoBackupIfNeeded() {
 async function restoreFromBackup(backupId) {
   const backupRef = db.collection("backups").doc(backupId);
   const [backupDoc, chemSnap, wasteSnap, entriesSnap, locSnap] = await Promise.all([
-    backupRef.get(),
-    backupRef.collection("chemicals").get(),
-    backupRef.collection("wasteCategories").get(),
-    backupRef.collection("wasteEntries").get(),
-    backupRef.collection("locations").get(),
+    withDbTimeout(backupRef.get(), "restore-meta-get-timeout"),
+    withDbTimeout(backupRef.collection("chemicals").get(), "restore-chemicals-get-timeout"),
+    withDbTimeout(backupRef.collection("wasteCategories").get(), "restore-wasteCategories-get-timeout"),
+    withDbTimeout(backupRef.collection("wasteEntries").get(), "restore-wasteEntries-get-timeout"),
+    withDbTimeout(backupRef.collection("locations").get(), "restore-locations-get-timeout"),
   ]);
   if (!backupDoc.exists) throw new Error("指定されたバックアップが見つかりません");
 
@@ -1084,7 +1100,7 @@ async function restoreFromBackup(backupId) {
 
   const settings = backupDoc.data().settings;
   if (settings && settings.passcode) {
-    await db.collection("meta").doc("settings").set({ passcode: settings.passcode }, { merge: true });
+    await withDbTimeout(db.collection("meta").doc("settings").set({ passcode: settings.passcode }, { merge: true }), "restore-passcode-set-timeout");
   }
 }
 
@@ -1842,7 +1858,7 @@ function SearchTab({ chemicals, onSelect, query, setQuery }) {
 /*  ホーム：場所タブ                                                    */
 /* ------------------------------------------------------------------ */
 
-function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, onAddLocation, onAddChemical, onDelete }) {
+function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, onAddLocation, onAddChemical }) {
   const locations = useMemo(() => {
     const map = new Map();
     chemicals.forEach((c) => {
@@ -2023,15 +2039,9 @@ function LocationGroupPage({ prefix, chemicals, extraLocations, onBack, onOpenLo
 /*  ホーム：在庫タブ（在庫量・保管場所がまだ未登録の薬品だけを表示）          */
 /* ------------------------------------------------------------------ */
 
-function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
+function InventoryTab({ chemicals, onEdit, onDelete }) {
   const PAGE_SIZE = 20;
   const [page, setPage] = useState(1);
-
-  const nameCounts = useMemo(() => {
-    const map = new Map();
-    chemicals.forEach((c) => map.set(c.name, (map.get(c.name) || 0) + 1));
-    return map;
-  }, [chemicals]);
 
   // 在庫量（重量）または保管場所のどちらかが未登録の薬品を対象にする。
   // ただし「FULL（未開封）」は重量こそ未計測だが状態としては登録済み（既知）なので、
@@ -2073,7 +2083,6 @@ function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
           const status = autoStatus(c.stock);
           const stockKnown = c.stock?.known !== false || c.stock?.status === "full";
           const locationUnregistered = isLocationUnregistered(c.location);
-          const hasNoOtherStock = (nameCounts.get(c.name) || 0) <= 1;
           return (
             <div key={c.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -2096,14 +2105,6 @@ function InventoryTab({ chemicals, onEdit, onDelete, onMarkNoStock }) {
                 >
                   <Package size={13} /> 編集する
                 </button>
-                {!stockKnown && hasNoOtherStock && (
-                  <button
-                    onClick={() => onMarkNoStock(c)}
-                    style={{ border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink, fontSize: 12.5, fontWeight: 600, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}
-                  >
-                    在庫なし
-                  </button>
-                )}
                 <button
                   onClick={() => onDelete(c)}
                   style={{ border: `1.5px solid ${C.danger}`, background: C.dangerBg, color: C.danger, fontSize: 12.5, fontWeight: 700, borderRadius: 8, padding: "8px 12px", cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}
@@ -3997,8 +3998,8 @@ function RestoreBackupPreviewPage({ backupId, onBack, onRestore }) {
       try {
         const backupRef = db.collection("backups").doc(backupId);
         const [metaSnap, chemSnap] = await Promise.all([
-          backupRef.get(),
-          backupRef.collection("chemicals").limit(12).get(),
+          withDbTimeout(backupRef.get(), "restorePreview-meta-get-timeout"),
+          withDbTimeout(backupRef.collection("chemicals").limit(12).get(), "restorePreview-chemicals-get-timeout"),
         ]);
         if (cancelled) return;
         if (!metaSnap.exists) {
@@ -4297,7 +4298,7 @@ const toggleTheme = () => {
     if (!chem) return;
     const newAmount = Math.max(0, +remaining.toFixed(2));
     try{
-      await db.collection("chemicals").doc(chemId).update({ "stock.amount": newAmount });
+      await withDbTimeout(db.collection("chemicals").doc(chemId).update({ "stock.amount": newAmount }), "saveMass-update-timeout");
     }catch(e){ toastFail("残量の保存", e); }
   };
 
@@ -4307,9 +4308,9 @@ const toggleTheme = () => {
       if (!window.confirm(`「${chem.name}」を在庫なし（空）として記録しますか？`)) return;
     }
     try{
-      await db.collection("chemicals").doc(chem.id).update({
+      await withDbTimeout(db.collection("chemicals").doc(chem.id).update({
         stock: { amount: 0, capacity: 0, unit: "g", known: true, status: "empty" },
-      });
+      }), "markNoStock-update-timeout");
     }catch(e){ toastFail("在庫なしの記録", e); }
   };
 
@@ -4390,10 +4391,10 @@ const toggleTheme = () => {
     const newId = "c_" + Date.now();
     const stock = isFull ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" } : { amount, capacity: 0, unit: "g", known: true };
     try{
-      await db
+      await withDbTimeout(db
         .collection("chemicals")
         .doc(newId)
-        .set({ name, formula: formula || "", cas: cas || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null, openDate: openDate || "" });
+        .set({ name, formula: formula || "", cas: cas || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null, openDate: openDate || "" }), "addChemical-set-timeout");
       goHome("inventory");
     }catch(e){ toastFail("薬品の追加", e); }
   };
@@ -4411,7 +4412,7 @@ const toggleTheme = () => {
     };
     if (stock) updates.stock = stock;
     try{
-      await db.collection("chemicals").doc(chem.id).update(updates);
+      await withDbTimeout(db.collection("chemicals").doc(chem.id).update(updates), "editChemical-update-timeout");
       pop();
     }catch(e){ toastFail("薬品情報の保存", e); }
   };
@@ -4435,7 +4436,7 @@ const toggleTheme = () => {
       batch.set(db.collection("locations").doc(id), { name, note }, { merge: true });
     });
     try{
-      await batch.commit();
+      await withDbTimeout(batch.commit(), "editLocation-commit-timeout");
       pop();
     }catch(e){ toastFail("場所情報の保存", e); }
   };
@@ -4444,25 +4445,9 @@ const toggleTheme = () => {
     const id = slugify(name);
     const maxOrder = Math.max(-1, ...locationsMeta.map((l) => (typeof l.order === "number" ? l.order : -1)));
     try{
-      await db.collection("locations").doc(id).set({ name, note: note || "", order: maxOrder + 1 });
+      await withDbTimeout(db.collection("locations").doc(id).set({ name, note: note || "", order: maxOrder + 1 }), "addLocation-set-timeout");
       goHome("location");
     }catch(e){ toastFail("場所の追加", e); }
-  };
-
-
-  const handleDeleteLocation = async (loc) => {
-    if (loc.items && loc.items.length > 0) {
-      if (typeof window !== "undefined" && window.alert) {
-        window.alert("この場所にはまだ薬品があります。先に薬品を削除するか、別の場所に移してから削除してください。");
-      }
-      return;
-    }
-    if (typeof window !== "undefined" && window.confirm) {
-      if (!window.confirm(`「${loc.name}」を保管場所一覧から削除しますか？`)) return;
-    }
-    try{
-      await db.collection("locations").doc(loc.id).delete();
-    }catch(e){ toastFail("場所の削除", e); }
   };
 
   const handleDeleteChemical = async (chem) => {
@@ -4470,7 +4455,7 @@ const toggleTheme = () => {
       if (!window.confirm(`「${chem.name}」を薬品一覧から削除しますか？`)) return;
     }
     try{
-      await db.collection("chemicals").doc(chem.id).delete();
+      await withDbTimeout(db.collection("chemicals").doc(chem.id).delete(), "deleteChemical-delete-timeout");
       pop();
     }catch(e){ toastFail("薬品の削除", e); }
   };
@@ -4478,10 +4463,10 @@ const toggleTheme = () => {
   const handleAddWasteEntry = async (wasteId, entry) => {
     const { id, ...rest } = entry;
     try{
-      await db.collection("wasteEntries").doc(id).set({ wasteId, ...rest });
+      await withDbTimeout(db.collection("wasteEntries").doc(id).set({ wasteId, ...rest }), "addWasteEntry-set-timeout");
       const cat = wasteMeta.find((w) => w.id === wasteId);
       if (cat && !cat.tankStartDate) {
-        await db.collection("wasteCategories").doc(wasteId).update({ tankStartDate: entry.date });
+        await withDbTimeout(db.collection("wasteCategories").doc(wasteId).update({ tankStartDate: entry.date }), "addWasteEntry-updateTankStart-timeout");
       }
       pop();
     }catch(e){ toastFail("投入記録の保存", e); }
@@ -4492,7 +4477,7 @@ const toggleTheme = () => {
       if (!window.confirm(`${entry.date}・${entry.personName}の記録（${entry.substanceName}）を削除しますか？`)) return;
     }
     try{
-      await db.collection("wasteEntries").doc(entry.id).delete();
+      await withDbTimeout(db.collection("wasteEntries").doc(entry.id).delete(), "deleteWasteEntry-delete-timeout");
       pop();
     }catch(e){ toastFail("投入記録の削除", e); }
   };
@@ -4537,7 +4522,7 @@ const handleDisposeWaste = (waste) => {
       });
 
       try{
-        await batch.commit();
+        await withDbTimeout(batch.commit(), "disposeWaste-commit-timeout");
         setPasscodeGate(null);
         goHome("waste");
       }catch(e){
@@ -4556,14 +4541,14 @@ const handleAddWasteCategory = ({ code, name, note, color }) => {
     onConfirm: async () => {
       const newId = "w_" + Date.now();
       try{
-        await db.collection("wasteCategories").doc(newId).set({
+        await withDbTimeout(db.collection("wasteCategories").doc(newId).set({
           code,
           name,
           note,
           color,
           disposal: DISPOSAL_POLICY,
           tankStartDate: null,
-        });
+        }), "addWasteCategory-set-timeout");
         setPasscodeGate(null);
         goHome("waste");
       }catch(e){
@@ -4588,7 +4573,7 @@ const handleOpenChangePasscode = () => {
 
 const handleSavePasscode = async (newPasscode) => {
   try{
-    await db.collection("meta").doc("settings").set({ passcode: newPasscode }, { merge: true });
+    await withDbTimeout(db.collection("meta").doc("settings").set({ passcode: newPasscode }, { merge: true }), "savePasscode-set-timeout");
     goHome("waste");
   }catch(e){ toastFail("パスコードの変更", e); }
 };
@@ -4611,7 +4596,7 @@ const handleDeleteWasteCategories = (wastes) => {
           w.entries.forEach((e) => batch.delete(db.collection("wasteEntries").doc(e.id)));
         });
         try{
-          await batch.commit();
+          await withDbTimeout(batch.commit(), "deleteWasteCategories-commit-timeout");
           setPasscodeGate(null);
           resolve(true);
         }catch(e){
@@ -4729,7 +4714,6 @@ const handleDeleteWasteCategories = (wastes) => {
                   onOpenGroup={(prefix) => push({ view: "locationGroup", prefix })}
                   onAddLocation={() => push({ view: "addLocation" })}
                   onAddChemical={() => push({ view: "addChemical" })}
-                  onDelete={handleDeleteLocation}
                 />
               )}
               {homeTab === "inventory" && (
@@ -4737,7 +4721,6 @@ const handleDeleteWasteCategories = (wastes) => {
                   chemicals={chemicals}
                   onEdit={(c) => push({ view: "editChemical", id: c.id })}
                   onDelete={handleDeleteChemical}
-                  onMarkNoStock={handleMarkNoStock}
                 />
               )}
               {homeTab === "waste" && (
