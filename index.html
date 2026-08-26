@@ -2663,6 +2663,7 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
 /* ------------------------------------------------------------------ */
 
 function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
+  const [name, setName] = useState(chemical.name || "");
   const [formula, setFormula] = useState(chemical.formula || "");
   const [cas, setCas] = useState(chemical.cas || CAS_LOOKUP[chemical.name] || "");
   const [locationName, setLocationName] = useState(chemical.location?.name || "");
@@ -2700,20 +2701,23 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
 
   const locationOptions = LOCATION_OPTIONS.includes(locationName) ? LOCATION_OPTIONS : [locationName, ...LOCATION_OPTIONS];
 
-  const canSave = locationName !== "" && (isFull || (amount !== "" && !isNaN(parseFloat(amount))));
+  const canSave = name.trim() !== "" && locationName !== "" && (isFull || (amount !== "" && !isNaN(parseFloat(amount))));
 
   const handleSave = () => {
     if (!canSave) return;
     const stock = isFull
       ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
       : { amount: Math.max(0, parseFloat(amount)), capacity: 0, unit: "g", known: true };
-    onSave(chemical, { formula: formula.trim(), cas: cas.trim(), locationName, subLocation: chemical.subLocation || "", wasteId, stock, purpose: purpose.trim(), openDate: openDate || "" });
+    onSave(chemical, { name: name.trim(), formula: formula.trim(), cas: cas.trim(), locationName, subLocation: chemical.subLocation || "", wasteId, stock, purpose: purpose.trim(), openDate: openDate || "" });
   };
 
   return (
     <div>
       <TopBar title={`${chemical.name}を編集`} onBack={onBack} />
       <div style={{ padding: 16 }}>
+        <SectionLabel>薬品名</SectionLabel>
+        <input style={{ ...inputStyle, marginBottom: 20 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="例：メタノール" />
+
         <SectionLabel>分子式（任意）</SectionLabel>
         <input style={{ ...inputStyle, marginBottom: 20, fontFamily: "'Roboto Mono', monospace" }} value={formula} onChange={(e) => setFormula(e.target.value)} placeholder="例：CH3OH（略称でも可）" />
 
@@ -4394,8 +4398,9 @@ const toggleTheme = () => {
     }catch(e){ toastFail("薬品の追加", e); }
   };
 
-  const handleEditChemical = async (chem, { formula, cas, locationName, subLocation, wasteId, stock, purpose, openDate }) => {
+  const handleEditChemical = async (chem, { name, formula, cas, locationName, subLocation, wasteId, stock, purpose, openDate }) => {
     const updates = {
+      name: (name || chem.name || "").trim(),
       formula: formula || "",
       cas: cas || "",
       location: resolveLocation(locationName || chem.location.name),
