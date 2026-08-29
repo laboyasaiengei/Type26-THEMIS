@@ -3089,9 +3089,29 @@ function WastePage({ waste, onBack, onOpenSubstance, onAddOther, onDispose }) {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", marginBottom: 12 }}>
-          <Calendar size={16} color={C.inkSoft} />
-          <span style={{ fontSize: 12.5, color: C.inkSoft }}>交換目安（使用開始から1年後）</span>
-          <span style={{ marginLeft: "auto", fontFamily: "'Roboto Mono', monospace", fontWeight: 700, color: isTankAgeWarning(waste) ? C.danger : C.ink }}>
+          <Calendar size={16} color={C.inkSoft} style={{ flex: "0 0 auto" }} />
+          <span
+            style={{
+              fontSize: "clamp(10px, 3vw, 12.5px)",
+              color: C.inkSoft,
+              whiteSpace: "nowrap",
+              letterSpacing: "-0.15px",
+              flex: "1 1 auto",
+              minWidth: 0,
+            }}
+          >
+            交換目安（使用開始から1年後）
+          </span>
+          <span
+            style={{
+              marginLeft: "auto",
+              fontFamily: "'Roboto Mono', monospace",
+              fontWeight: 700,
+              color: isTankAgeWarning(waste) ? C.danger : C.ink,
+              whiteSpace: "nowrap",
+              flex: "0 0 auto",
+            }}
+          >
             {tankReplaceDate(waste.tankStartDate) || "未設定"}
           </span>
         </div>
