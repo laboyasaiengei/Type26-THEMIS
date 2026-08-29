@@ -1575,7 +1575,7 @@ function HazardStripe({ height = 6 }) {
   );
 }
 
-function TopBar({ title, subtitle, subtitle2, onBack, right, rightTop, rightBottom, bleed = true, titleFont = "'Space Grotesk', sans-serif" }) {
+function TopBar({ title, subtitle, subtitle2, onBack, right, bleed = true, titleFont = "'Space Grotesk', sans-serif" }) {
   return (
     <div
       className={bleed ? "topbar-bleed" : undefined}
@@ -1606,7 +1606,7 @@ function TopBar({ title, subtitle, subtitle2, onBack, right, rightTop, rightBott
           </button>
         )}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 32 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div
               style={{
                 fontFamily: titleFont,
@@ -1623,31 +1623,27 @@ function TopBar({ title, subtitle, subtitle2, onBack, right, rightTop, rightBott
             >
               {title}
             </div>
-            {rightTop || right}
+            {right}
           </div>
           {subtitle && (
-            <div style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 30, marginTop: 1 }}>
-              <div
-                style={{
-                  fontSize: 10,
-                  color: HEADER.textSoft,
-                  letterSpacing: 0.15,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  flex: 1,
-                  minWidth: 0,
-                }}
-              >
-                {subtitle}
-              </div>
-              {rightBottom}
+            <div
+              style={{
+                fontSize: 11,
+                color: HEADER.textSoft,
+                marginTop: 1,
+                letterSpacing: 0.3,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {subtitle}
             </div>
           )}
           {subtitle2 && (
             <div
               style={{
-                fontSize: 9,
+                fontSize: 11,
                 color: HEADER.textSoft,
                 opacity: 0.75,
                 marginTop: 2,
@@ -4657,22 +4653,11 @@ const handleDeleteWasteCategories = (wastes) => {
         {current.view === "home" && (
           <>
 <TopBar
-  title={
-    <span>
-      薬品在庫・廃液管理システム{" "}
-      <span
-        style={{
-          fontFamily: "'Orbitron', 'Roboto Mono', monospace",
-          fontWeight: 700,
-          letterSpacing: 1.1,
-        }}
-      >
-        CAESAR
-      </span>
-    </span>
-  }
-  subtitle="Chemical And Effluent System for Administration & Registry"
-  rightTop={
+  title="CAESAR"
+  titleFont="'Orbitron', 'Roboto Mono', monospace"
+  subtitle="薬品在庫・廃液管理システム"
+  subtitle2="Chemical And Effluent System for Administration & Registry"
+  right={
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <button
         onClick={handleExportExcel}
@@ -4690,17 +4675,14 @@ const handleDeleteWasteCategories = (wastes) => {
       >
         <RotateCcw size={16} />
       </button>
+      <button
+        onClick={toggleTheme}
+        aria-label="ダークモード切替"
+        style={{ border: "none", background: "rgba(255,255,255,.14)", color: HEADER.text, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 999, padding: 0, flex: "0 0 auto", fontSize: 14 }}
+      >
+        {theme === "dark" ? "☀️" : "🌙"}
+      </button>
     </div>
-  }
-  rightBottom={
-    <button
-      onClick={toggleTheme}
-      aria-label="ダークモード切替"
-      title="ダークモード切替"
-      style={{ border: "none", background: "rgba(255,255,255,.14)", color: HEADER.text, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 999, padding: 0, flex: "0 0 auto", fontSize: 14 }}
-    >
-      {theme === "dark" ? "☀️" : "🌙"}
-    </button>
   }
 />
 
