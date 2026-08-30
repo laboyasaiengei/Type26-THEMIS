@@ -4673,10 +4673,22 @@ const handleDeleteWasteCategories = (wastes) => {
         {current.view === "home" && (
           <>
 <TopBar
-  title="CAESAR"
-  titleFont="'Orbitron', 'Roboto Mono', monospace"
-  subtitle="薬品在庫・廃液管理システム"
-  subtitle2="Chemical And Effluent System for Administration & Registry"
+  title={
+    <img
+      src="icons/caesar-logo.png"
+      alt="CAESAR"
+      style={{
+        display: "block",
+        width: "min(42vw, 180px)",
+        maxWidth: "100%",
+        height: "auto",
+        maxHeight: 36,
+        objectFit: "contain",
+        objectPosition: "left center",
+      }}
+    />
+  }
+  subtitle="Chemical And Effluent System for Administration & Registry"
   right={
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <button
