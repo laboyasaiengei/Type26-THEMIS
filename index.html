@@ -1575,7 +1575,7 @@ function HazardStripe({ height = 6 }) {
   );
 }
 
-function TopBar({ title, subtitle, subtitle2, onBack, right, bleed = true, titleFont = "'Space Grotesk', sans-serif" }) {
+function TopBar({ title, subtitle, subtitle2, onBack, right, bleed = true, titleFont = "'Space Grotesk', sans-serif", compact = false }) {
   return (
     <div
       className={bleed ? "topbar-bleed" : undefined}
@@ -1593,7 +1593,9 @@ function TopBar({ title, subtitle, subtitle2, onBack, right, bleed = true, title
           display: "flex",
           alignItems: "center",
           gap: 10,
-          padding: "max(14px + env(safe-area-inset-top, 0px), 34px) 16px 14px",
+          padding: compact
+            ? "max(8px + env(safe-area-inset-top, 0px), 26px) 16px 8px"
+            : "max(14px + env(safe-area-inset-top, 0px), 34px) 16px 14px",
         }}
       >
         {onBack && (
@@ -4656,6 +4658,7 @@ const handleDeleteWasteCategories = (wastes) => {
         {current.view === "home" && (
           <>
 <TopBar
+  compact
   title={
     <img
       src="icons/caesar-logo.png"
