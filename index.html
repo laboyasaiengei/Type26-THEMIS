@@ -4017,10 +4017,7 @@ function RestoreBackupPreviewPage({ backupId, onBack, onRestore }) {
     (async () => {
       try {
         const backupRef = db.collection("backups").doc(backupId);
-        const [metaSnap, chemSnap] = await Promise.all([
-          withDbTimeout(backupRef.get(), "restorePreview-meta-get-timeout"),
-          withDbTimeout(backupRef.collection("chemicals").limit(12).get(), "restorePreview-chemicals-get-timeout"),
-        ]);
+        const metaSnap = await withDbTimeout(backupRef.get(), "restorePreview-meta-get-timeout");
         if (cancelled) return;
         if (!metaSnap.exists) {
           setError("このバックアップは見つかりませんでした。");
@@ -4028,7 +4025,6 @@ function RestoreBackupPreviewPage({ backupId, onBack, onRestore }) {
         }
         setDetail({
           meta: metaSnap.data(),
-          previewNames: chemSnap.docs.map((d) => d.data().name).filter(Boolean),
         });
       } catch (e) {
         console.error("backup preview fetch error", e);
@@ -4082,19 +4078,6 @@ function RestoreBackupPreviewPage({ backupId, onBack, onRestore }) {
                 保管場所：{detail.meta.counts?.locations ?? 0}件
               </div>
             </div>
-
-            {detail.previewNames.length > 0 && (
-              <div style={{ marginBottom: 16 }}>
-                <SectionLabel>薬品プレビュー（一部抜粋）</SectionLabel>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                  {detail.previewNames.map((n, i) => (
-                    <span key={i} style={{ fontSize: 11.5, background: C.lockBg, color: C.ink, borderRadius: 999, padding: "4px 10px" }}>
-                      {n}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
 
             <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: C.dangerBg, border: `1px solid ${C.danger}`, borderRadius: 10, padding: "12px 14px", marginBottom: 20 }}>
               <AlertTriangle size={16} color={C.danger} style={{ flexShrink: 0, marginTop: 1 }} />
@@ -4676,20 +4659,18 @@ const handleDeleteWasteCategories = (wastes) => {
   title={
     <img
       src="icons/caesar-logo.png"
-      alt="CAESAR"
+      alt="CAESAR 薬品・廃液管理システム"
       style={{
         display: "block",
-        width: "min(42vw, 180px)",
-        maxWidth: "100%",
+        width: "100%",
+        maxWidth: 430,
         height: "auto",
-        maxHeight: 36,
+        maxHeight: 88,
         objectFit: "contain",
         objectPosition: "left center",
       }}
     />
   }
-  subtitle="薬品・廃液管理システム"
-  subtitle2="Chemical And Effluent System for Administration & Registry"
   right={
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <button
