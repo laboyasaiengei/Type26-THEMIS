@@ -135,6 +135,7 @@ function ChevronRight(props) { return (<IconBase {...props}><polyline points="9 
 function ArrowLeft(props) { return (<IconBase {...props}><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></IconBase>); }
 function Save(props) { return (<IconBase {...props}><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></IconBase>); }
 function RotateCcw(props) { return (<IconBase {...props}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><polyline points="3 3 3 8 8 8"/></IconBase>); }
+function RefreshCw(props) { return (<IconBase {...props}><path d="M21 12a9 9 0 0 0-15.5-6.2L3 8"/><polyline points="3 3 3 8 8 8"/><path d="M3 12a9 9 0 0 0 15.5 6.2L21 16"/><polyline points="21 21 21 16 16 16"/></IconBase>); }
 function Download(props) { return (<IconBase {...props}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></IconBase>); }
 function AlertTriangle(props) { return (<IconBase {...props}><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></IconBase>); }
 function Package(props) { return (<IconBase {...props}><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></IconBase>); }
@@ -843,7 +844,7 @@ function isAppCheckDisabledByUrl(){
 
 
 /* ======================================================================
-   CAESAR REST PRODUCTION 1.1 (60SEC + 429 FAILSAFE)
+   CAESAR REST PRODUCTION 1.2 (ON-DEMAND SYNC + 429 FAILSAFE)
    - Firestore data read/write: REST only
    - Firebase Auth SDK is not used for data authentication
    - App Check: existing reCAPTCHA v3 provider
@@ -852,7 +853,6 @@ function isAppCheckDisabledByUrl(){
    - Firestore Web SDK read/write is not used
    ====================================================================== */
 const CAESAR_REST_REFRESH_KEY = "caesarRestProductionRefreshToken";
-const CAESAR_REST_POLL_MS = 60000;
 const CAESAR_REST_BACKOFF_MS = [4000, 10000, 30000, 60000];
 const CAESAR_REST_QUOTA_BACKOFF_MS = [60000, 120000, 300000, 900000];
 
@@ -870,10 +870,13 @@ function caesarRestIsQuotaError(e){
   ));
 }
 function caesarRestEnterQuotaCooldown(){
+  // 同時に複数リクエストが429になっても、1回の事故で段階を何段も進めない。
+  const remaining = Math.max(0, caesarRestQuotaCooldownUntil - Date.now());
+  if(remaining > 0) return remaining;
   const idx = Math.min(caesarRestQuotaFailureCount, CAESAR_REST_QUOTA_BACKOFF_MS.length - 1);
   const wait = CAESAR_REST_QUOTA_BACKOFF_MS[idx];
   caesarRestQuotaFailureCount = Math.min(caesarRestQuotaFailureCount + 1, CAESAR_REST_QUOTA_BACKOFF_MS.length - 1);
-  caesarRestQuotaCooldownUntil = Math.max(caesarRestQuotaCooldownUntil, Date.now() + wait);
+  caesarRestQuotaCooldownUntil = Date.now() + wait;
   return wait;
 }
 function caesarRestQuotaDelayRemaining(){
@@ -1036,17 +1039,37 @@ async function caesarGetRawDoc(segments){
   const res = await fetch(caesarDocUrl(segments), {headers, cache:"no-store"});
   if(res.status === 404) return null;
   const raw = await res.text();
-  if(!res.ok) throw new Error(`REST GET HTTP ${res.status}: ${raw.slice(0,400)}`);
+  if(!res.ok){
+    const err = new Error(`REST GET HTTP ${res.status}: ${raw.slice(0,400)}`);
+    err.httpStatus = res.status;
+    throw err;
+  }
   return raw ? JSON.parse(raw) : null;
 }
 async function caesarCommit(writes){
   if(!writes.length) return {};
+  const quotaWait = caesarRestQuotaDelayRemaining();
+  if(quotaWait > 0){
+    const e = new Error(`Firestore quota cooldown active (${Math.ceil(quotaWait/1000)}s)`);
+    e.httpStatus = 429;
+    throw e;
+  }
   const headers = await caesarRestHeaders();
   const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/(default)/documents:commit`;
   const res = await fetch(url, {method:"POST", headers, body:JSON.stringify({writes}), cache:"no-store"});
   const raw = await res.text();
-  if(!res.ok) throw new Error(`REST COMMIT HTTP ${res.status}: ${raw.slice(0,500)}`);
-  return raw ? JSON.parse(raw) : {};
+  if(!res.ok){
+    const err = new Error(`REST COMMIT HTTP ${res.status}: ${raw.slice(0,500)}`);
+    err.httpStatus = res.status;
+    if(caesarRestIsQuotaError(err)) caesarRestEnterQuotaCooldown();
+    throw err;
+  }
+  caesarRestClearQuotaCooldown();
+  const result = raw ? JSON.parse(raw) : {};
+  // Firestoreへ書き込めた内容は、ネットワーク再読込せずローカル購読キャッシュへ反映する。
+  // これにより「自分の操作」は即時表示しつつ、全件再取得のread消費を発生させない。
+  caesarRestApplyCommittedWrites(writes);
+  return result;
 }
 function caesarSetWrite(segments, data, merge){
   const normalized = caesarNormalizeDottedData(data || {});
@@ -1120,6 +1143,189 @@ async function caesarRunQuery(collectionRef, queryState){
   };
 }
 
+// ---------------------------------------------------------------------
+// On-demand subscription cache
+// Firestore SDK互換の onSnapshot API は維持するが、定期ポーリングは行わない。
+// 1) 起動時に1回だけ取得
+// 2) この端末の書き込みはローカルキャッシュへ即時反映（追加readなし）
+// 3) 他端末の変更はヘッダーの「更新」ボタンで明示的に再取得
+// ---------------------------------------------------------------------
+const caesarRestQuerySubscriptions = new Set();
+const caesarRestDocSubscriptions = new Set();
+
+function caesarRestPlainSnapshot(ref, exists, data){
+  const plain = data == null ? null : data;
+  return {
+    id: ref.id,
+    ref,
+    exists: !!exists,
+    data(){ return exists ? plain : undefined; }
+  };
+}
+function caesarRestDeepClone(v){
+  if(v == null || typeof v !== "object") return v;
+  if(Array.isArray(v)) return v.map(caesarRestDeepClone);
+  const out = {};
+  Object.keys(v).forEach(k => out[k] = caesarRestDeepClone(v[k]));
+  return out;
+}
+function caesarRestDeepMerge(base, patch){
+  const out = (base && typeof base === "object" && !Array.isArray(base)) ? caesarRestDeepClone(base) : {};
+  Object.keys(patch || {}).forEach(k => {
+    const pv = patch[k];
+    if(pv && typeof pv === "object" && !Array.isArray(pv)) out[k] = caesarRestDeepMerge(out[k], pv);
+    else out[k] = caesarRestDeepClone(pv);
+  });
+  return out;
+}
+function caesarRestSegmentsFromDocName(name){
+  const marker = "/documents/";
+  const i = String(name || "").indexOf(marker);
+  if(i < 0) return [];
+  return String(name).slice(i + marker.length).split("/").map(x => decodeURIComponent(x));
+}
+function caesarRestCompareValues(a,b){
+  if(a == null && b == null) return 0;
+  if(a == null) return -1;
+  if(b == null) return 1;
+  if(typeof a === "number" && typeof b === "number") return a-b;
+  return String(a).localeCompare(String(b), "ja");
+}
+function caesarRestGetPath(obj, path){
+  return String(path).split(".").reduce((v,k)=>(v == null ? undefined : v[k]), obj);
+}
+function caesarRestSnapshotFromRecords(sub){
+  let rows = Array.from(sub.records.entries()).map(([id,data]) => caesarRestPlainSnapshot(sub.collectionRef.doc(id), true, data));
+  const orders = (sub.state && sub.state.orders) || [];
+  if(orders.length){
+    rows.sort((A,B)=>{
+      const a=A.data(), b=B.data();
+      for(const o of orders){
+        let c=caesarRestCompareValues(caesarRestGetPath(a,o.field), caesarRestGetPath(b,o.field));
+        if(String(o.dir||"asc").toLowerCase()==="desc") c=-c;
+        if(c) return c;
+      }
+      return A.id.localeCompare(B.id);
+    });
+  }
+  if(sub.state && sub.state.limit != null) rows = rows.slice(0, sub.state.limit);
+  return { docs:rows, size:rows.length, empty:rows.length===0, forEach(cb){ rows.forEach(cb); } };
+}
+function caesarRestEmitQuerySub(sub){
+  if(sub.stopped) return;
+  try{ sub.onNext && sub.onNext(caesarRestSnapshotFromRecords(sub)); }
+  catch(e){ console.error("CAESAR local subscription callback failed", e); }
+}
+function caesarRestEmitDocSub(sub){
+  if(sub.stopped) return;
+  try{ sub.onNext && sub.onNext(caesarRestPlainSnapshot(sub.ref, sub.exists, sub.data)); }
+  catch(e){ console.error("CAESAR local document callback failed", e); }
+}
+
+async function caesarRestLoadQuerySub(sub, isInitial){
+  if(sub.stopped) return;
+  const quotaWait = caesarRestQuotaDelayRemaining();
+  if(quotaWait > 0){
+    const e = new Error(`Firestore quota cooldown active (${Math.ceil(quotaWait/1000)}s)`); e.httpStatus=429;
+    if(isInitial){
+      sub.retryTimer = setTimeout(()=>caesarRestLoadQuerySub(sub, true), quotaWait + 250);
+    }
+    throw e;
+  }
+  try{
+    const snap = await caesarRunQuery(sub.collectionRef, sub.state);
+    sub.records = new Map(snap.docs.map(d => [d.id, caesarRestDeepClone(d.data())]));
+    sub.failure = 0;
+    caesarRestPollFailureCount = 0;
+    caesarRestClearQuotaCooldown();
+    caesarRestEmitQuerySub(sub);
+    return snap;
+  }catch(e){
+    if(caesarRestIsQuotaError(e)){
+      const wait = caesarRestEnterQuotaCooldown();
+      console.warn("CAESAR REST quota failsafe: HTTP 429; reads paused", wait, e);
+      if(isInitial && !sub.stopped) sub.retryTimer = setTimeout(()=>caesarRestLoadQuerySub(sub, true), wait + 250);
+    }else if(isInitial && !sub.stopped){
+      sub.failure = Math.min((sub.failure||0)+1, CAESAR_REST_BACKOFF_MS.length-1);
+      caesarRestPollFailureCount = sub.failure;
+      const wait = CAESAR_REST_BACKOFF_MS[sub.failure];
+      sub.retryTimer = setTimeout(()=>caesarRestLoadQuerySub(sub, true), wait);
+    }
+    if(isInitial) sub.onError && sub.onError(e);
+    throw e;
+  }
+}
+async function caesarRestLoadDocSub(sub, isInitial){
+  if(sub.stopped) return;
+  const quotaWait = caesarRestQuotaDelayRemaining();
+  if(quotaWait > 0){
+    const e = new Error(`Firestore quota cooldown active (${Math.ceil(quotaWait/1000)}s)`); e.httpStatus=429;
+    if(isInitial) sub.retryTimer = setTimeout(()=>caesarRestLoadDocSub(sub, true), quotaWait + 250);
+    throw e;
+  }
+  try{
+    const snap = await sub.ref.get();
+    sub.exists = snap.exists;
+    sub.data = snap.exists ? caesarRestDeepClone(snap.data()) : null;
+    sub.failure = 0;
+    caesarRestClearQuotaCooldown();
+    caesarRestEmitDocSub(sub);
+    return snap;
+  }catch(e){
+    if(caesarRestIsQuotaError(e)){
+      const wait = caesarRestEnterQuotaCooldown();
+      console.warn("CAESAR REST quota failsafe: HTTP 429; reads paused", wait, e);
+      if(isInitial && !sub.stopped) sub.retryTimer = setTimeout(()=>caesarRestLoadDocSub(sub, true), wait + 250);
+    }else if(isInitial && !sub.stopped){
+      sub.failure = Math.min((sub.failure||0)+1, CAESAR_REST_BACKOFF_MS.length-1);
+      sub.retryTimer = setTimeout(()=>caesarRestLoadDocSub(sub, true), CAESAR_REST_BACKOFF_MS[sub.failure]);
+    }
+    if(isInitial) sub.onError && sub.onError(e);
+    throw e;
+  }
+}
+
+async function caesarRestRefreshAll(){
+  const q = Array.from(caesarRestQuerySubscriptions).filter(s=>!s.stopped).map(s=>caesarRestLoadQuerySub(s, false));
+  const d = Array.from(caesarRestDocSubscriptions).filter(s=>!s.stopped).map(s=>caesarRestLoadDocSub(s, false));
+  const results = await Promise.allSettled([...q,...d]);
+  const bad = results.find(r=>r.status==="rejected");
+  if(bad) throw bad.reason;
+  return results.length;
+}
+
+function caesarRestApplyCommittedWrites(writes){
+  for(const w of (writes || [])){
+    const name = w.update ? w.update.name : w.delete;
+    const seg = caesarRestSegmentsFromDocName(name);
+    if(seg.length < 2) continue;
+    const docId = seg[seg.length-1];
+    const collectionSeg = seg.slice(0,-1);
+    const collectionKey = collectionSeg.join("/");
+    const docKey = seg.join("/");
+    const patch = w.update ? caesarDecodeDocument(w.update) : null;
+    const isMerge = !!(w.update && w.updateMask);
+
+    caesarRestQuerySubscriptions.forEach(sub=>{
+      if(sub.stopped || sub.collectionRef._segments.join("/") !== collectionKey) return;
+      if(w.delete){
+        sub.records.delete(docId);
+      }else{
+        const prev = sub.records.get(docId);
+        sub.records.set(docId, isMerge ? caesarRestDeepMerge(prev, patch) : caesarRestDeepClone(patch));
+      }
+      caesarRestEmitQuerySub(sub);
+    });
+
+    caesarRestDocSubscriptions.forEach(sub=>{
+      if(sub.stopped || sub.ref._segments.join("/") !== docKey) return;
+      if(w.delete){ sub.exists=false; sub.data=null; }
+      else { sub.exists=true; sub.data=isMerge ? caesarRestDeepMerge(sub.data, patch) : caesarRestDeepClone(patch); }
+      caesarRestEmitDocSub(sub);
+    });
+  }
+}
+
 function caesarQueryRef(collectionRef, state){
   const base = {
     orders:[...((state && state.orders) || [])],
@@ -1132,44 +1338,14 @@ function caesarQueryRef(collectionRef, state){
     limit(n){ return caesarQueryRef(collectionRef, {...base, limit:n}); },
     async get(){ return caesarRunQuery(collectionRef, base); },
     onSnapshot(onNext, onError){
-      let stopped = false;
-      let timer = null;
-      let lastJson = null;
-      let failure = 0;
-      const run = async () => {
-        if(stopped) return;
-        const quotaWait = caesarRestQuotaDelayRemaining();
-        if(quotaWait > 0){
-          timer = setTimeout(run, quotaWait + Math.floor(Math.random() * 1500));
-          return;
-        }
-        try{
-          const snap = await caesarRunQuery(collectionRef, base);
-          const json = JSON.stringify(snap.docs.map(d => ({id:d.id, data:d.data()})));
-          if(json !== lastJson){
-            lastJson = json;
-            onNext && onNext(snap);
-          }
-          failure = 0;
-          caesarRestPollFailureCount = 0;
-          caesarRestClearQuotaCooldown();
-          timer = setTimeout(run, CAESAR_REST_POLL_MS);
-        }catch(e){
-          if(caesarRestIsQuotaError(e)){
-            const wait = caesarRestEnterQuotaCooldown();
-            console.warn("CAESAR REST quota failsafe: HTTP 429; polling paused", wait, e);
-            onError && onError(e);
-            timer = setTimeout(run, wait + Math.floor(Math.random() * 1500));
-            return;
-          }
-          failure = Math.min(failure + 1, CAESAR_REST_BACKOFF_MS.length - 1);
-          caesarRestPollFailureCount = failure;
-          onError && onError(e);
-          timer = setTimeout(run, CAESAR_REST_BACKOFF_MS[failure]);
-        }
+      const sub = {collectionRef, state:base, onNext, onError, records:new Map(), stopped:false, failure:0, retryTimer:null};
+      caesarRestQuerySubscriptions.add(sub);
+      caesarRestLoadQuerySub(sub, true).catch(()=>{});
+      return () => {
+        sub.stopped=true;
+        if(sub.retryTimer) clearTimeout(sub.retryTimer);
+        caesarRestQuerySubscriptions.delete(sub);
       };
-      run();
-      return () => { stopped = true; if(timer) clearTimeout(timer); };
     }
   };
 }
@@ -1184,42 +1360,14 @@ function caesarDocRef(segments){
     async delete(){ return caesarCommit([caesarDeleteWrite(segments)]); },
     collection(name){ return caesarCollectionRef([...segments, String(name)], false); },
     onSnapshot(onNext, onError){
-      let stopped = false;
-      let timer = null;
-      let lastJson = null;
-      let failure = 0;
-      const run = async () => {
-        if(stopped) return;
-        const quotaWait = caesarRestQuotaDelayRemaining();
-        if(quotaWait > 0){
-          timer = setTimeout(run, quotaWait + Math.floor(Math.random() * 1500));
-          return;
-        }
-        try{
-          const snap = await ref.get();
-          const json = JSON.stringify({exists:snap.exists, data:snap.exists?snap.data():null});
-          if(json !== lastJson){
-            lastJson = json;
-            onNext && onNext(snap);
-          }
-          failure = 0;
-          caesarRestClearQuotaCooldown();
-          timer = setTimeout(run, CAESAR_REST_POLL_MS);
-        }catch(e){
-          if(caesarRestIsQuotaError(e)){
-            const wait = caesarRestEnterQuotaCooldown();
-            console.warn("CAESAR REST quota failsafe: HTTP 429; document polling paused", wait, e);
-            onError && onError(e);
-            timer = setTimeout(run, wait + Math.floor(Math.random() * 1500));
-            return;
-          }
-          failure = Math.min(failure + 1, CAESAR_REST_BACKOFF_MS.length - 1);
-          onError && onError(e);
-          timer = setTimeout(run, CAESAR_REST_BACKOFF_MS[failure]);
-        }
+      const sub = {ref, onNext, onError, exists:false, data:null, stopped:false, failure:0, retryTimer:null};
+      caesarRestDocSubscriptions.add(sub);
+      caesarRestLoadDocSub(sub, true).catch(()=>{});
+      return () => {
+        sub.stopped=true;
+        if(sub.retryTimer) clearTimeout(sub.retryTimer);
+        caesarRestDocSubscriptions.delete(sub);
       };
-      run();
-      return () => { stopped = true; if(timer) clearTimeout(timer); };
     }
   };
   return ref;
@@ -1332,7 +1480,7 @@ async function seedIfNeeded() {
 // ここではマーカーの存在だけ確認し、万一未インポートの環境があれば警告に留める
 // （stock値を上書きする再インポートは行わない＝ユーザーの記録を保護）。
 const EXCEL_IMPORT_VERSION = "2026-08-13-katakana-v5";
-const SYNC_REV = "396-REST-PROD-1.0"; // internal build tag — do not remove
+const SYNC_REV = "397-REST-PROD-1.2-ONDEMAND"; // internal build tag — do not remove
 async function syncExcelInventoryIfNeeded() {
   const markerRef = db.collection("meta").doc("excelInventoryImport");
   const markerSnap = await withDbTimeout(markerRef.get(), "excelImportMarker-get-timeout");
@@ -1364,7 +1512,7 @@ async function fixEvansBlueFullStatusIfNeeded() {
 const BACKUP_BATCH_SIZE = 400; // Firestoreの1バッチ上限(500)よりやや余裕を持たせる
 const MAX_BACKUP_AGE_MS = 5 * 24 * 60 * 60 * 1000; // これより古い自動バックアップは削除する（5日）
 const MAX_BACKUPS_KEPT = 200; // 万が一大量に溜まった場合の安全上限（手動分も含む・自動は上のage基準で先に間引かれる）
-const AUTO_BACKUP_INTERVAL_MS = 60 * 60 * 1000; // 自動バックアップの最短間隔（1時間）
+const AUTO_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 自動バックアップの最短間隔（24時間＝1日1回）
 
 function chunkArray(arr, size) {
   const out = [];
@@ -4548,7 +4696,20 @@ const toggleTheme = () => {
   }, 260);
 };
 
-  // ログイン（匿名）→ 初回だけモックデータを流し込み → Firestore購読、の順で立ち上げる。
+  const handleManualRefresh = async () => {
+    try {
+      const count = await caesarRestRefreshAll();
+      showToast(count ? "最新データに更新しました" : "更新対象はありません");
+    } catch (e) {
+      if (caesarRestIsQuotaError(e)) {
+        showToast("Firestoreのread上限に近いため、更新を一時停止しています", true);
+      } else {
+        toastFail("データ更新", e);
+      }
+    }
+  };
+
+  // ログイン（匿名）→ 初回だけデータ取得 → ローカル購読キャッシュ、の順で立ち上げる。
   // どこで失敗しても画面が真っ白にならないよう、必ずエラーを画面に出す。
   useEffect(() => {
     if (firebaseInitError) return;
@@ -4603,7 +4764,7 @@ const toggleTheme = () => {
           // 運用中の環境ではほぼ即return（何もしない）で終わるはずのもの。
           // 起動のたびにこれらを直列に待つと、途中のFirestore通信が1回でも
           // 詰まった場合にアプリ全体が起動不能になってしまうため、
-          // 本体の表示（onSnapshot購読）はブロックさせず、裏で試すだけにする。
+          // 本体の初回データ取得はブロックさせず、裏で試すだけにする。
           seedIfNeeded()
             .then(() => syncExcelInventoryIfNeeded())
             .then(() => fixEvansBlueFullStatusIfNeeded())
@@ -4673,7 +4834,7 @@ const toggleTheme = () => {
   }, []);
 
   // 起動時のチェックだけだと「開きっぱなしのタブ」では次に誰かがアプリを開くまで
-  // バックアップが作られない。AUTO_BACKUP_INTERVAL_MS（1時間）おきにも
+  // バックアップが作られない。AUTO_BACKUP_INTERVAL_MS（24時間）おきにも
   // チェックし直すことで、長時間開いたままのセッションでも定期的に残るようにする。
   useEffect(() => {
     const timer = setInterval(() => {
@@ -5076,6 +5237,14 @@ const handleDeleteWasteCategories = (wastes) => {
   }
   right={
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <button
+        onClick={handleManualRefresh}
+        aria-label="最新データを取得"
+        title="最新データを取得（手動更新）"
+        style={{ border: "none", background: "rgba(255,255,255,.14)", color: HEADER.text, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 999, padding: 0, flex: "0 0 auto" }}
+      >
+        <RefreshCw size={16} />
+      </button>
       <button
         onClick={handleExportExcel}
         aria-label="薬品一覧をExcelで書き出す"
