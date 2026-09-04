@@ -828,8 +828,8 @@ const firebaseConfig = {
   appId: "1:53578950676:web:9bfa421c445853afafdf01",
 };
 
-// Firebase Console → App Check → このアプリを登録 → reCAPTCHA v3 で発行されたサイトキーを貼る
-const RECAPTCHA_V3_SITE_KEY = "6LeMq5ctAAAAAF-BqNcFg9WIZUzjHykV_x9XH-I8";
+// Firebase Console → App Check → 本線Webアプリの reCAPTCHA Enterprise サイトキーを貼る
+const RECAPTCHA_ENTERPRISE_SITE_KEY = "6LeawqgtAAAAAJfoUf2mOF9e7p0sU6rvy6RtmW3Q";
 // ローカルで動作確認する時だけ有効化（本番公開時はコメントアウトのままでOK）
 // self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
 
@@ -841,22 +841,382 @@ function isAppCheckDisabledByUrl(){
   }catch(e){ return false; }
 }
 
+
+/* ======================================================================
+   CAESAR REST PRODUCTION 1.0
+   - Firestore data read/write: REST only
+   - Firebase Auth SDK is not used for data authentication
+   - App Check: existing reCAPTCHA v3 provider
+   - Firebase project: PRODUCTION (zikkenkanri-56d16)
+   - Existing production collections/data are used unchanged
+   - Firestore Web SDK read/write is not used
+   ====================================================================== */
+const CAESAR_REST_REFRESH_KEY = "caesarRestProductionRefreshToken";
+const CAESAR_REST_POLL_MS = 4000;
+const CAESAR_REST_BACKOFF_MS = [4000, 10000, 30000, 60000];
+
+let caesarRestIdToken = "";
+let caesarRestRefreshToken = "";
+let caesarRestAuthReady = false;
+let caesarRestPollFailureCount = 0;
+
+function caesarRestTimeout(promise, ms, label){
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject)=>{
+      timer = setTimeout(()=>reject(Object.assign(new Error(label+"-timeout"), {isTimeout:true})), ms);
+    })
+  ]).finally(()=>clearTimeout(timer));
+}
+
+async function caesarRestAuthRequest(){
+  const saved = localStorage.getItem(CAESAR_REST_REFRESH_KEY) || "";
+  if(saved){
+    try{
+      const res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(firebaseConfig.apiKey)}`, {
+        method:"POST",
+        headers:{"Content-Type":"application/x-www-form-urlencoded"},
+        body:"grant_type=refresh_token&refresh_token="+encodeURIComponent(saved),
+        cache:"no-store"
+      });
+      const raw = await res.text();
+      if(!res.ok) throw new Error(`REST Auth refresh HTTP ${res.status}: ${raw.slice(0,220)}`);
+      const data = JSON.parse(raw);
+      caesarRestIdToken = data.id_token || "";
+      caesarRestRefreshToken = data.refresh_token || saved;
+      if(!caesarRestIdToken) throw new Error("REST Auth refresh: ID token missing");
+      localStorage.setItem(CAESAR_REST_REFRESH_KEY, caesarRestRefreshToken);
+      caesarRestAuthReady = true;
+      return true;
+    }catch(e){
+      localStorage.removeItem(CAESAR_REST_REFRESH_KEY);
+    }
+  }
+
+  const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(firebaseConfig.apiKey)}`, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({returnSecureToken:true}),
+    cache:"no-store"
+  });
+  const raw = await res.text();
+  if(!res.ok) throw new Error(`REST Auth signUp HTTP ${res.status}: ${raw.slice(0,220)}`);
+  const data = JSON.parse(raw);
+  caesarRestIdToken = data.idToken || "";
+  caesarRestRefreshToken = data.refreshToken || "";
+  if(!caesarRestIdToken) throw new Error("REST Auth signUp: ID token missing");
+  if(caesarRestRefreshToken) localStorage.setItem(CAESAR_REST_REFRESH_KEY, caesarRestRefreshToken);
+  caesarRestAuthReady = true;
+  return true;
+}
+
+async function caesarGetAppCheckToken(){
+  if(isAppCheckDisabledByUrl()) return "";
+  if(!RECAPTCHA_ENTERPRISE_SITE_KEY || RECAPTCHA_ENTERPRISE_SITE_KEY === "PASTE_ENTERPRISE_SITE_KEY_HERE"){
+    throw new Error("Enterprise site key is not configured");
+  }
+  const result = await caesarRestTimeout(firebase.appCheck().getToken(false), 10000, "appcheck-token");
+  const token = result && result.token ? result.token : "";
+  if(!token) throw new Error("App Check token missing");
+  return token;
+}
+
+async function caesarRestHeaders(){
+  if(!caesarRestIdToken) await caesarRestAuthRequest();
+  const headers = {
+    "Authorization": "Bearer " + caesarRestIdToken,
+    "Content-Type": "application/json"
+  };
+  const appCheck = await caesarGetAppCheckToken();
+  if(appCheck) headers["X-Firebase-AppCheck"] = appCheck;
+  return headers;
+}
+
+function caesarEncodeValue(v){
+  if(v === null || v === undefined) return {nullValue:null};
+  if(typeof v === "boolean") return {booleanValue:v};
+  if(typeof v === "number") return Number.isInteger(v) ? {integerValue:String(v)} : {doubleValue:v};
+  if(typeof v === "string") return {stringValue:v};
+  if(Array.isArray(v)) return {arrayValue:{values:v.map(caesarEncodeValue)}};
+  if(typeof v === "object"){
+    const fields = {};
+    Object.keys(v).forEach(k => fields[k] = caesarEncodeValue(v[k]));
+    return {mapValue:{fields}};
+  }
+  return {stringValue:String(v)};
+}
+function caesarDecodeValue(v){
+  if(!v || typeof v !== "object") return null;
+  if("nullValue" in v) return null;
+  if("booleanValue" in v) return !!v.booleanValue;
+  if("integerValue" in v) return Number(v.integerValue);
+  if("doubleValue" in v) return Number(v.doubleValue);
+  if("stringValue" in v) return v.stringValue;
+  if("timestampValue" in v) return v.timestampValue;
+  if("arrayValue" in v) return ((v.arrayValue && v.arrayValue.values) || []).map(caesarDecodeValue);
+  if("mapValue" in v){
+    const out = {};
+    const fields = (v.mapValue && v.mapValue.fields) || {};
+    Object.keys(fields).forEach(k => out[k] = caesarDecodeValue(fields[k]));
+    return out;
+  }
+  if("referenceValue" in v) return v.referenceValue;
+  return null;
+}
+function caesarDecodeDocument(doc){
+  const data = {};
+  const fields = (doc && doc.fields) || {};
+  Object.keys(fields).forEach(k => data[k] = caesarDecodeValue(fields[k]));
+  return data;
+}
+function caesarSetDeep(obj, path, value){
+  const parts = String(path).split(".");
+  let cur = obj;
+  for(let i=0;i<parts.length-1;i++){
+    if(!cur[parts[i]] || typeof cur[parts[i]] !== "object") cur[parts[i]] = {};
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length-1]] = value;
+}
+function caesarNormalizeDottedData(data){
+  const out = {};
+  Object.keys(data || {}).forEach(k => caesarSetDeep(out, k, data[k]));
+  return out;
+}
+function caesarFieldsFromObject(data){
+  const fields = {};
+  Object.keys(data || {}).forEach(k => fields[k] = caesarEncodeValue(data[k]));
+  return fields;
+}
+function caesarRandomId(){
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const bytes = new Uint8Array(20);
+  crypto.getRandomValues(bytes);
+  let out = "";
+  bytes.forEach(n => out += chars[n % chars.length]);
+  return out;
+}
+function caesarPathEncode(segments){
+  return segments.map(x => encodeURIComponent(String(x))).join("/");
+}
+function caesarDocName(segments){
+  return `projects/${firebaseConfig.projectId}/databases/(default)/documents/${segments.join("/")}`;
+}
+function caesarDocUrl(segments){
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/(default)/documents/${caesarPathEncode(segments)}`;
+}
+
+async function caesarGetRawDoc(segments){
+  const headers = await caesarRestHeaders();
+  const res = await fetch(caesarDocUrl(segments), {headers, cache:"no-store"});
+  if(res.status === 404) return null;
+  const raw = await res.text();
+  if(!res.ok) throw new Error(`REST GET HTTP ${res.status}: ${raw.slice(0,400)}`);
+  return raw ? JSON.parse(raw) : null;
+}
+async function caesarCommit(writes){
+  if(!writes.length) return {};
+  const headers = await caesarRestHeaders();
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/(default)/documents:commit`;
+  const res = await fetch(url, {method:"POST", headers, body:JSON.stringify({writes}), cache:"no-store"});
+  const raw = await res.text();
+  if(!res.ok) throw new Error(`REST COMMIT HTTP ${res.status}: ${raw.slice(0,500)}`);
+  return raw ? JSON.parse(raw) : {};
+}
+function caesarSetWrite(segments, data, merge){
+  const normalized = caesarNormalizeDottedData(data || {});
+  const write = {
+    update: {
+      name: caesarDocName(segments),
+      fields: caesarFieldsFromObject(normalized)
+    }
+  };
+  if(merge){
+    write.updateMask = {fieldPaths:Object.keys(data || {})};
+  }
+  return write;
+}
+function caesarDeleteWrite(segments){
+  return {delete:caesarDocName(segments)};
+}
+
+function caesarDocSnapshot(ref, doc){
+  const exists = !!doc;
+  return {
+    id: ref.id,
+    ref,
+    exists,
+    data(){ return exists ? caesarDecodeDocument(doc) : undefined; }
+  };
+}
+
+async function caesarRunQuery(collectionRef, queryState){
+  const headers = await caesarRestHeaders();
+  const parentSegments = collectionRef._segments.slice(0, -1);
+  const collectionId = collectionRef._segments[collectionRef._segments.length - 1];
+  const structuredQuery = {from:[{collectionId}]};
+  if(queryState && queryState.orders && queryState.orders.length){
+    structuredQuery.orderBy = queryState.orders.map(o => ({
+      field:{fieldPath:o.field},
+      direction:String(o.dir || "asc").toLowerCase() === "desc" ? "DESCENDING" : "ASCENDING"
+    }));
+  }
+  if(queryState && queryState.limit != null) structuredQuery.limit = queryState.limit;
+
+  const base = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/(default)/documents`;
+  const url = parentSegments.length
+    ? `${base}/${caesarPathEncode(parentSegments)}:runQuery`
+    : `${base}:runQuery`;
+
+  const res = await fetch(url, {
+    method:"POST",
+    headers,
+    body:JSON.stringify({structuredQuery}),
+    cache:"no-store"
+  });
+  const raw = await res.text();
+  if(!res.ok) throw new Error(`REST QUERY HTTP ${res.status}: ${raw.slice(0,500)}`);
+  const rows = raw ? JSON.parse(raw) : [];
+  const docs = (Array.isArray(rows) ? rows : [])
+    .filter(r => r && r.document)
+    .map(r => {
+      const id = (r.document.name || "").split("/").pop();
+      return caesarDocSnapshot(collectionRef.doc(id), r.document);
+    });
+  return {
+    docs,
+    size:docs.length,
+    empty:docs.length === 0,
+    forEach(cb){ docs.forEach(cb); }
+  };
+}
+
+function caesarQueryRef(collectionRef, state){
+  const base = {
+    orders:[...((state && state.orders) || [])],
+    limit:state && state.limit != null ? state.limit : null
+  };
+  return {
+    orderBy(field, dir){
+      return caesarQueryRef(collectionRef, {...base, orders:[...base.orders, {field:String(field), dir:dir || "asc"}]});
+    },
+    limit(n){ return caesarQueryRef(collectionRef, {...base, limit:n}); },
+    async get(){ return caesarRunQuery(collectionRef, base); },
+    onSnapshot(onNext, onError){
+      let stopped = false;
+      let timer = null;
+      let lastJson = null;
+      let failure = 0;
+      const run = async () => {
+        if(stopped) return;
+        try{
+          const snap = await caesarRunQuery(collectionRef, base);
+          const json = JSON.stringify(snap.docs.map(d => ({id:d.id, data:d.data()})));
+          if(json !== lastJson){
+            lastJson = json;
+            onNext && onNext(snap);
+          }
+          failure = 0;
+          caesarRestPollFailureCount = 0;
+          timer = setTimeout(run, CAESAR_REST_POLL_MS);
+        }catch(e){
+          failure = Math.min(failure + 1, CAESAR_REST_BACKOFF_MS.length - 1);
+          caesarRestPollFailureCount = failure;
+          onError && onError(e);
+          timer = setTimeout(run, CAESAR_REST_BACKOFF_MS[failure]);
+        }
+      };
+      run();
+      return () => { stopped = true; if(timer) clearTimeout(timer); };
+    }
+  };
+}
+
+function caesarDocRef(segments){
+  const ref = {
+    _segments:segments,
+    id:segments[segments.length - 1],
+    async get(){ return caesarDocSnapshot(ref, await caesarGetRawDoc(segments)); },
+    async set(data, opts){ return caesarCommit([caesarSetWrite(segments, data, !!(opts && opts.merge))]); },
+    async update(data){ return caesarCommit([caesarSetWrite(segments, data, true)]); },
+    async delete(){ return caesarCommit([caesarDeleteWrite(segments)]); },
+    collection(name){ return caesarCollectionRef([...segments, String(name)], false); },
+    onSnapshot(onNext, onError){
+      let stopped = false;
+      let timer = null;
+      let lastJson = null;
+      let failure = 0;
+      const run = async () => {
+        if(stopped) return;
+        try{
+          const snap = await ref.get();
+          const json = JSON.stringify({exists:snap.exists, data:snap.exists?snap.data():null});
+          if(json !== lastJson){
+            lastJson = json;
+            onNext && onNext(snap);
+          }
+          failure = 0;
+          timer = setTimeout(run, CAESAR_REST_POLL_MS);
+        }catch(e){
+          failure = Math.min(failure + 1, CAESAR_REST_BACKOFF_MS.length - 1);
+          onError && onError(e);
+          timer = setTimeout(run, CAESAR_REST_BACKOFF_MS[failure]);
+        }
+      };
+      run();
+      return () => { stopped = true; if(timer) clearTimeout(timer); };
+    }
+  };
+  return ref;
+}
+
+function caesarCollectionRef(segments, topLevel){
+  const ref = {
+    _segments:segments,
+    doc(id){
+      const docId = id || caesarRandomId();
+      return caesarDocRef([...segments, docId]);
+    },
+    async get(){ return caesarRunQuery(ref, {orders:[], limit:null}); },
+    orderBy(field, dir){ return caesarQueryRef(ref, {orders:[{field:String(field), dir:dir || "asc"}], limit:null}); },
+    limit(n){ return caesarQueryRef(ref, {orders:[], limit:n}); },
+    onSnapshot(onNext, onError){ return caesarQueryRef(ref, {orders:[], limit:null}).onSnapshot(onNext, onError); }
+  };
+  return ref;
+}
+
+const caesarRestDb = {
+  collection(name){
+    return caesarCollectionRef([String(name)], true);
+  },
+  batch(){
+    const writes = [];
+    return {
+      set(ref, data, opts){ writes.push(caesarSetWrite(ref._segments, data, !!(opts && opts.merge))); return this; },
+      update(ref, data){ writes.push(caesarSetWrite(ref._segments, data, true)); return this; },
+      delete(ref){ writes.push(caesarDeleteWrite(ref._segments)); return this; },
+      async commit(){ return caesarCommit(writes); }
+    };
+  }
+};
+
 let db = null;
 let firebaseInitError = null;
+
 try {
   firebase.initializeApp(firebaseConfig);
-  if (RECAPTCHA_V3_SITE_KEY && RECAPTCHA_V3_SITE_KEY !== "YOUR_RECAPTCHA_V3_SITE_KEY" && !isAppCheckDisabledByUrl()) {
-    firebase.appCheck().activate(RECAPTCHA_V3_SITE_KEY, true);
+  if (
+    RECAPTCHA_ENTERPRISE_SITE_KEY &&
+    RECAPTCHA_ENTERPRISE_SITE_KEY !== "PASTE_ENTERPRISE_SITE_KEY_HERE" &&
+    !isAppCheckDisabledByUrl()
+  ) {
+    firebase.appCheck().activate(
+      new firebase.appCheck.ReCaptchaEnterpriseProvider(RECAPTCHA_ENTERPRISE_SITE_KEY),
+      true
+    );
   }
-  db = firebase.firestore();
-  // 特定のiOSバージョンで、1回目の通信は成功するが2回目以降のFirestore通信が
-  // 固まる（ストリーミング/コネクション再利用まわりの不具合と思われる）症状への対策。
-  // ロングポーリング方式に切り替えることで回避できる場合がある。
-  try {
-  db.settings({ experimentalForceLongPolling: true, merge: true });
-  } catch (e) {
-    console.warn("Firestore settings(long polling)適用に失敗:", e);
-  }
+  db = caesarRestDb;
 } catch (err) {
   firebaseInitError = err;
   console.error("Firebase init failed", err);
@@ -881,23 +1241,9 @@ function withDbTimeout(promise, tag) {
 // Firestoreのルールを「ログイン済みのみ許可」にするための最低限のログイン。
 // 画面上にログインUIは出さず、開いたら自動で匿名サインインする。
 function ensureSignedIn() {
-  return new Promise((resolve, reject) => {
-    if (!window.firebase || !firebase.auth) {
-      reject(new Error("firebase.auth が読み込まれていません"));
-      return;
-    }
-    firebase.auth().onAuthStateChanged((user) => {
-      if (user) {
-        resolve(user);
-      } else {
-        firebase
-          .auth()
-          .signInAnonymously()
-          .catch(reject);
-      }
-    }, reject);
-  });
+  return caesarRestAuthRequest().then(() => ({ uid: "rest-anonymous" }));
 }
+
 
 // 初回アクセス時だけ、モックデータをFirestoreに書き込む。
 // meta/status ドキュメントの有無で「初回かどうか」を判定するので、
@@ -932,7 +1278,7 @@ async function seedIfNeeded() {
 // ここではマーカーの存在だけ確認し、万一未インポートの環境があれば警告に留める
 // （stock値を上書きする再インポートは行わない＝ユーザーの記録を保護）。
 const EXCEL_IMPORT_VERSION = "2026-08-13-katakana-v5";
-const SYNC_REV = "396"; // internal build tag — do not remove
+const SYNC_REV = "396-REST-PROD-1.0"; // internal build tag — do not remove
 async function syncExcelInventoryIfNeeded() {
   const markerRef = db.collection("meta").doc("excelInventoryImport");
   const markerSnap = await withDbTimeout(markerRef.get(), "excelImportMarker-get-timeout");
