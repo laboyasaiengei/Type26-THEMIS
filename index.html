@@ -843,7 +843,7 @@ function isAppCheckDisabledByUrl(){
 
 
 /* ======================================================================
-   CAESAR REST PRODUCTION 1.0
+   CAESAR REST PRODUCTION 1.1 (60SEC + 429 FAILSAFE)
    - Firestore data read/write: REST only
    - Firebase Auth SDK is not used for data authentication
    - App Check: existing reCAPTCHA v3 provider
@@ -852,13 +852,37 @@ function isAppCheckDisabledByUrl(){
    - Firestore Web SDK read/write is not used
    ====================================================================== */
 const CAESAR_REST_REFRESH_KEY = "caesarRestProductionRefreshToken";
-const CAESAR_REST_POLL_MS = 4000;
+const CAESAR_REST_POLL_MS = 60000;
 const CAESAR_REST_BACKOFF_MS = [4000, 10000, 30000, 60000];
+const CAESAR_REST_QUOTA_BACKOFF_MS = [60000, 120000, 300000, 900000];
 
 let caesarRestIdToken = "";
 let caesarRestRefreshToken = "";
 let caesarRestAuthReady = false;
 let caesarRestPollFailureCount = 0;
+let caesarRestQuotaFailureCount = 0;
+let caesarRestQuotaCooldownUntil = 0;
+
+function caesarRestIsQuotaError(e){
+  return !!(e && (
+    e.httpStatus === 429 ||
+    /HTTP 429|RESOURCE_EXHAUSTED|Quota exceeded/i.test(String(e.message || ""))
+  ));
+}
+function caesarRestEnterQuotaCooldown(){
+  const idx = Math.min(caesarRestQuotaFailureCount, CAESAR_REST_QUOTA_BACKOFF_MS.length - 1);
+  const wait = CAESAR_REST_QUOTA_BACKOFF_MS[idx];
+  caesarRestQuotaFailureCount = Math.min(caesarRestQuotaFailureCount + 1, CAESAR_REST_QUOTA_BACKOFF_MS.length - 1);
+  caesarRestQuotaCooldownUntil = Math.max(caesarRestQuotaCooldownUntil, Date.now() + wait);
+  return wait;
+}
+function caesarRestQuotaDelayRemaining(){
+  return Math.max(0, caesarRestQuotaCooldownUntil - Date.now());
+}
+function caesarRestClearQuotaCooldown(){
+  caesarRestQuotaFailureCount = 0;
+  caesarRestQuotaCooldownUntil = 0;
+}
 
 function caesarRestTimeout(promise, ms, label){
   let timer;
@@ -1076,7 +1100,11 @@ async function caesarRunQuery(collectionRef, queryState){
     cache:"no-store"
   });
   const raw = await res.text();
-  if(!res.ok) throw new Error(`REST QUERY HTTP ${res.status}: ${raw.slice(0,500)}`);
+  if(!res.ok){
+    const err = new Error(`REST QUERY HTTP ${res.status}: ${raw.slice(0,500)}`);
+    err.httpStatus = res.status;
+    throw err;
+  }
   const rows = raw ? JSON.parse(raw) : [];
   const docs = (Array.isArray(rows) ? rows : [])
     .filter(r => r && r.document)
@@ -1110,6 +1138,11 @@ function caesarQueryRef(collectionRef, state){
       let failure = 0;
       const run = async () => {
         if(stopped) return;
+        const quotaWait = caesarRestQuotaDelayRemaining();
+        if(quotaWait > 0){
+          timer = setTimeout(run, quotaWait + Math.floor(Math.random() * 1500));
+          return;
+        }
         try{
           const snap = await caesarRunQuery(collectionRef, base);
           const json = JSON.stringify(snap.docs.map(d => ({id:d.id, data:d.data()})));
@@ -1119,8 +1152,16 @@ function caesarQueryRef(collectionRef, state){
           }
           failure = 0;
           caesarRestPollFailureCount = 0;
+          caesarRestClearQuotaCooldown();
           timer = setTimeout(run, CAESAR_REST_POLL_MS);
         }catch(e){
+          if(caesarRestIsQuotaError(e)){
+            const wait = caesarRestEnterQuotaCooldown();
+            console.warn("CAESAR REST quota failsafe: HTTP 429; polling paused", wait, e);
+            onError && onError(e);
+            timer = setTimeout(run, wait + Math.floor(Math.random() * 1500));
+            return;
+          }
           failure = Math.min(failure + 1, CAESAR_REST_BACKOFF_MS.length - 1);
           caesarRestPollFailureCount = failure;
           onError && onError(e);
@@ -1149,6 +1190,11 @@ function caesarDocRef(segments){
       let failure = 0;
       const run = async () => {
         if(stopped) return;
+        const quotaWait = caesarRestQuotaDelayRemaining();
+        if(quotaWait > 0){
+          timer = setTimeout(run, quotaWait + Math.floor(Math.random() * 1500));
+          return;
+        }
         try{
           const snap = await ref.get();
           const json = JSON.stringify({exists:snap.exists, data:snap.exists?snap.data():null});
@@ -1157,8 +1203,16 @@ function caesarDocRef(segments){
             onNext && onNext(snap);
           }
           failure = 0;
+          caesarRestClearQuotaCooldown();
           timer = setTimeout(run, CAESAR_REST_POLL_MS);
         }catch(e){
+          if(caesarRestIsQuotaError(e)){
+            const wait = caesarRestEnterQuotaCooldown();
+            console.warn("CAESAR REST quota failsafe: HTTP 429; document polling paused", wait, e);
+            onError && onError(e);
+            timer = setTimeout(run, wait + Math.floor(Math.random() * 1500));
+            return;
+          }
           failure = Math.min(failure + 1, CAESAR_REST_BACKOFF_MS.length - 1);
           onError && onError(e);
           timer = setTimeout(run, CAESAR_REST_BACKOFF_MS[failure]);
@@ -4565,7 +4619,7 @@ const toggleTheme = () => {
             (err) => {
               clearStartupTimeout();
               console.error("chemicals subscription error", err);
-              setFatalError("薬品データの取得に失敗しました：" + err.message);
+              if(!caesarRestIsQuotaError(err)) setFatalError("薬品データの取得に失敗しました：" + err.message);
               setLoading(false);
             }
           );
@@ -4573,14 +4627,14 @@ const toggleTheme = () => {
             (snap) => setWasteMeta(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
             (err) => {
               console.error("wasteCategories subscription error", err);
-              setFatalError("廃液分類データの取得に失敗しました：" + err.message);
+              if(!caesarRestIsQuotaError(err)) setFatalError("廃液分類データの取得に失敗しました：" + err.message);
             }
           );
           unsubEntries = db.collection("wasteEntries").onSnapshot(
             (snap) => setWasteEntriesRaw(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
             (err) => {
               console.error("wasteEntries subscription error", err);
-              setFatalError("廃液記録データの取得に失敗しました：" + err.message);
+              if(!caesarRestIsQuotaError(err)) setFatalError("廃液記録データの取得に失敗しました：" + err.message);
             }
           );
           unsubSettings = db.collection("meta").doc("settings").onSnapshot(
@@ -4746,7 +4800,7 @@ const toggleTheme = () => {
         .collection("chemicals")
         .doc(newId)
         .set({ name, formula: formula || "", cas: cas || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null, openDate: openDate || "" }), "addChemical-set-timeout");
-      pop();
+      goHome("inventory");
     }catch(e){ toastFail("薬品の追加", e); }
   };
 
