@@ -1154,6 +1154,31 @@ const SENTINEL_SHARED_ACTIVITY_QUIET_MS = 30*1000;
 let sentinelSharedActivityTimer=null;
 let sentinelSharedLastSuccessAt=0;
 
+
+function sentinelSharedEnsureMinuteBaseline(){
+  try{
+    const state=sentinelSharedLoadState();
+    if(!state || typeof state!=="object") return;
+    if(state.__baselineV04===true) return;
+
+    const local=sentinelTelemetryLoad();
+    const sent=state.sent && typeof state.sent==="object" ? state.sent : {};
+    if(local && local.buckets && typeof local.buckets==="object"){
+      for(const [minute,b] of Object.entries(local.buckets)){
+        const r=Math.max(0,Number(b&&b.reads)||0);
+        const w=Math.max(0,Number(b&&b.writes)||0);
+        const d=Math.max(0,Number(b&&b.deletes)||0);
+        sent[minute]={reads:r,writes:w,deletes:d};
+      }
+    }
+    state.sent=sent;
+    state.__baselineV04=true;
+    sentinelSharedSaveState(state);
+  }catch(e){
+    console.warn("[SENTINEL] baseline init skipped",e);
+  }
+}
+
 function sentinelSharedLoadState(){
   try{
     const x=JSON.parse(localStorage.getItem(SENTINEL_SHARED_STATE_KEY)||"null");
