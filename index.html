@@ -47,6 +47,16 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
      全要素（renderFormulaが1文字ずつ生成するspanを含む）を個別にアニメーション
      させる代わりに、この1枚だけをフェードさせて色の切り替わりを覆い隠す
      （iPhone Safariでのコマ落ち対策）。 */
+  .caesar-system-modal{position:fixed;inset:0;z-index:100000;display:none;align-items:center;justify-content:center;padding:20px;background:rgba(8,14,18,.42);backdrop-filter:blur(2px);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+  .caesar-system-modal.show{display:flex;}
+  .caesar-system-dialog{width:min(92vw,420px);background:#FBFBF9;color:#182524;border:1px solid #D8DED8;border-radius:16px;padding:20px;box-shadow:0 18px 48px rgba(0,0,0,.28);}
+  html[data-theme="dark"] .caesar-system-dialog{background:#1C2426;color:#E9EEEC;border-color:#2C3739;}
+  .caesar-system-message{font-size:14px;line-height:1.65;white-space:pre-wrap;margin-bottom:18px;}
+  .caesar-system-actions{display:flex;gap:10px;justify-content:flex-end;}
+  .caesar-system-actions button{font:600 13px 'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;border-radius:10px;padding:9px 15px;cursor:pointer;}
+  .caesar-system-cancel{background:transparent;color:inherit;border:1px solid #D8DED8;}
+  html[data-theme="dark"] .caesar-system-cancel{border-color:#2C3739;}
+  .caesar-system-ok{background:#122A4E;color:#fff;border:1px solid #122A4E;}
   .theme-curtain{
     position: fixed; inset: 0; z-index: 99999;
     background: #EEF1EC;
@@ -84,6 +94,10 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
   @media (min-width: 1100px){
     .topbar-inner{ max-width: 1080px; }
   }
+
+  /* OSダーク起動時：ロード画面はlightのまま、完成画面だけ滑らかにdarkへクロスフェード */
+  body.caesar-startup-theme-transition #root{ opacity:0; }
+  #root{ transition:opacity .42s cubic-bezier(.22,.61,.36,1); }
 </style>
 <script>
 (function(){
@@ -104,6 +118,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 </div>
 <div id="root"></div>
 <div id="themeCurtain" class="theme-curtain"></div>
+<div id="caesarSystemModal" class="caesar-system-modal" aria-hidden="true"><div class="caesar-system-dialog" role="dialog" aria-modal="true"><div id="caesarSystemMessage" class="caesar-system-message"></div><div class="caesar-system-actions"><button id="caesarSystemCancel" class="caesar-system-cancel" type="button">キャンセル</button><button id="caesarSystemOk" class="caesar-system-ok" type="button">OK</button></div></div></div>
 
 <script>
   window.addEventListener('error', function (e) {
@@ -208,6 +223,17 @@ const DARK_TOKENS = {
 // オブジェクトの「中身」だけをテーマ切替時に丸ごと書き換える(mutate)。
 const C = { ...LIGHT_TOKENS };
 
+/* ---- CAESAR共通確認ダイアログ ---- */
+function caesarConfirm(message, okLabel="OK"){
+  return new Promise((resolve)=>{
+    const modal=document.getElementById("caesarSystemModal"), msg=document.getElementById("caesarSystemMessage"), ok=document.getElementById("caesarSystemOk"), cancel=document.getElementById("caesarSystemCancel");
+    if(!modal||!msg||!ok||!cancel){ resolve(window.confirm(message)); return; }
+    msg.textContent=message; ok.textContent=okLabel; modal.classList.add("show"); modal.setAttribute("aria-hidden","false");
+    const finish=(v)=>{modal.classList.remove("show");modal.setAttribute("aria-hidden","true");ok.onclick=null;cancel.onclick=null;resolve(v);};
+    ok.onclick=()=>finish(true); cancel.onclick=()=>finish(false);
+  });
+}
+
 /* ---- 保存・削除失敗時などに使う簡易トースト通知（React外のDOMに直接描画） ---- */
 function showToast(msg, isError){
   let t = document.getElementById("themisToast");
@@ -217,6 +243,7 @@ function showToast(msg, isError){
     t.style.cssText = [
       "position:fixed", "left:50%", "bottom:24px", "transform:translateX(-50%) translateY(20px)",
       "color:#fff", "padding:10px 18px", "border-radius:10px", "font-size:13px",
+      "font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif", "font-weight:500",
       "box-shadow:0 6px 20px rgba(0,0,0,.25)", "z-index:99999", "opacity:0",
       "transition:opacity .2s, transform .2s", "pointer-events:none", "max-width:88vw", "text-align:center"
     ].join(";");
@@ -5003,7 +5030,7 @@ function RestoreBackupPreviewPage({ backupId, onBack, onRestore }) {
 
   const handleConfirmRestore = () => {
     if (typeof window !== "undefined" && window.confirm) {
-      const ok = window.confirm(
+      const ok = await caesarConfirm(
         "この内容で復元します。現在の薬品・廃液分類・保管場所などのデータはすべて上書きされ、元に戻せません。本当によろしいですか？"
       );
       if (!ok) return;
@@ -5085,6 +5112,7 @@ function ChemStockApp() {
 const [passcodeGate, setPasscodeGate] = useState(null);
 const [adminPasscode, setAdminPasscode] = useState(DEFAULT_ADMIN_PASSCODE);
 const [theme, setTheme] = useState("light");
+const startupThemeAppliedRef = React.useRef(false);
 Object.assign(C, theme === "dark" ? DARK_TOKENS : LIGHT_TOKENS);
 useEffect(() => {
   document.documentElement.dataset.theme = theme;
@@ -5110,6 +5138,35 @@ const toggleTheme = () => {
     });
   }, 260);
 };
+
+  const applySystemThemeAfterStartup = () => {
+    if (startupThemeAppliedRef.current) return;
+    startupThemeAppliedRef.current = true;
+    let wantsDark = false;
+    try { wantsDark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches); } catch (_) {}
+    if (!wantsDark) return;
+    const curtain = document.getElementById("themeCurtain");
+    if (!curtain) { setTheme("dark"); return; }
+
+    // まず現在のロード画面と同じlight色で完全に覆う。
+    // その裏でReactテーマをdarkへ切り替え、描画完了後にカーテンを消す。
+    document.body.classList.add("caesar-startup-theme-transition");
+    curtain.style.transition = "none";
+    curtain.style.background = LIGHT_TOKENS.bg;
+    curtain.style.opacity = "1";
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setTheme("dark");
+
+        window.setTimeout(() => {
+          curtain.style.transition = "opacity .58s cubic-bezier(.22,.61,.36,1)";
+          document.body.classList.remove("caesar-startup-theme-transition");
+          requestAnimationFrame(() => { curtain.style.opacity = "0"; });
+        }, 140);
+      });
+    });
+  };
 
   const handleManualRefresh = async () => {
     try {
@@ -5190,6 +5247,7 @@ const toggleTheme = () => {
             (snap) => {
               clearStartupTimeout();
               setChemicals(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+              applySystemThemeAfterStartup();
               setLoading(false);
             },
             (err) => {
@@ -5286,7 +5344,7 @@ const toggleTheme = () => {
   // 未登録（重量不明）の薬品を「在庫なし」として確定させる。他に同名の在庫が無い時だけ使える簡易操作。
   const handleMarkNoStock = async (chem) => {
     if (typeof window !== "undefined" && window.confirm) {
-      if (!window.confirm(`「${chem.name}」を在庫なし（空）として記録しますか？`)) return;
+      if (!(await caesarConfirm(`「${chem.name}」を在庫なし（空）として記録しますか？`))) return;
     }
     try{
       await withDbTimeout(db.collection("chemicals").doc(chem.id).update({
@@ -5433,7 +5491,7 @@ const toggleTheme = () => {
 
   const handleDeleteChemical = async (chem) => {
     if (typeof window !== "undefined" && window.confirm) {
-      if (!window.confirm(`「${chem.name}」を薬品一覧から削除しますか？`)) return;
+      if (!(await caesarConfirm(`「${chem.name}」を薬品一覧から削除しますか？`))) return;
     }
     try{
       await withDbTimeout(db.collection("chemicals").doc(chem.id).delete(), "deleteChemical-delete-timeout");
@@ -5455,7 +5513,7 @@ const toggleTheme = () => {
 
   const handleDeleteWasteEntry = async (wasteId, entry) => {
     if (typeof window !== "undefined" && window.confirm) {
-      if (!window.confirm(`${entry.date}・${entry.personName}の記録（${entry.substanceName}）を削除しますか？`)) return;
+      if (!(await caesarConfirm(`${entry.date}・${entry.personName}の記録（${entry.substanceName}）を削除しますか？`))) return;
     }
     try{
       await withDbTimeout(db.collection("wasteEntries").doc(entry.id).delete(), "deleteWasteEntry-delete-timeout");
