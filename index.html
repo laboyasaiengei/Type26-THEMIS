@@ -1075,6 +1075,9 @@ function sentinelTelemetryRecord(reads,writes,deletes,kind){
     const cutoff=Date.now()-8*24*60*60*1000;
     Object.keys(s.buckets).forEach(x=>{if(Number(x)<cutoff)delete s.buckets[x];});
     sentinelTelemetrySave(s);
+    // v0.6: actual Firestore activity arms one quiet-period cargo.
+    if(typeof sentinelSharedRequestActivityFlush==="function")
+      sentinelSharedRequestActivityFlush();
   }catch(e){console.warn("[SENTINEL] telemetry record skipped",e);}
 }
 function sentinelTelemetryRecordCommit(writes,kind){
@@ -1117,7 +1120,7 @@ window.SENTINEL_CAESAR={
 
 
 /* ==================================================================
-   SENTINEL Shared Sync v0.4 · 1-minute buckets / 10-minute flush / SAFEFLUSH
+   SENTINEL Shared Sync v0.6 · 1-minute buckets / SAFEFLUSH + ACTIVITY FLUSH
    Shared sink: Dev-CAESAR Firestore (anonymous auth + App Check)
    - local Telemetry v0.2 remains the source of truth on this device
    - every 10 minutes, only positive unsent deltas are atomically incremented
@@ -1144,6 +1147,12 @@ let sentinelSharedTimer=null;
 let sentinelSharedBusy=false;
 let sentinelSharedFirebaseApp=null;
 let sentinelSharedLastStatus={ok:false,at:0,error:"",writes:0};
+
+// v0.6 ACTIVITY FLUSH: aggregate active app traffic, then send one cargo
+// after a 30-second quiet period. The 10-minute timetable remains backup.
+const SENTINEL_SHARED_ACTIVITY_QUIET_MS = 30*1000;
+let sentinelSharedActivityTimer=null;
+let sentinelSharedLastSuccessAt=0;
 
 function sentinelSharedLoadState(){
   try{
@@ -1335,7 +1344,9 @@ async function sentinelSharedFlush(){
     });
     if(pruned)sentinelSharedSaveState(state);
 
-    sentinelSharedLastStatus={ok:true,at:Date.now(),error:"",writes};
+    const doneAt=Date.now();
+    sentinelSharedLastStatus={ok:true,at:doneAt,error:"",writes};
+    sentinelSharedLastSuccessAt=doneAt;
     return true;
   }catch(e){
     sentinelSharedLastStatus={ok:false,at:Date.now(),error:e&&e.message?e.message:String(e),writes};
@@ -1352,41 +1363,60 @@ function sentinelSharedSchedule(){
     sentinelSharedSchedule();
   },SENTINEL_SHARED_SYNC_MS);
 }
+
+function sentinelSharedHasPending(){
+  try{return sentinelSharedDeltaPlan().plan.length>0;}catch(_){return false;}
+}
+
+function sentinelSharedRequestActivityFlush(){
+  // Never write to Shared for every CAESAR operation. Restart one quiet timer
+  // and ship the accumulated unsent delta as a single cargo.
+  if(sentinelSharedActivityTimer)clearTimeout(sentinelSharedActivityTimer);
+  sentinelSharedActivityTimer=setTimeout(async()=>{
+    sentinelSharedActivityTimer=null;
+    if(!navigator.onLine || sentinelSharedBusy || !sentinelSharedHasPending()) return;
+    console.info("[SENTINEL] activity flush");
+    await sentinelSharedFlush();
+    sentinelSharedSchedule();
+  },SENTINEL_SHARED_ACTIVITY_QUIET_MS);
+}
+
+function sentinelSharedResumeCheck(reason){
+  if(document.visibilityState!=="visible") return;
+  if(!navigator.onLine || sentinelSharedBusy || !sentinelSharedHasPending()) return;
+  console.info("[SENTINEL] resume dispatch",reason||"resume");
+  sentinelSharedFlush().finally(sentinelSharedSchedule);
+}
+
 window.SENTINEL_SHARED={
   appId:SENTINEL_SHARED_APP_ID,
   flush:sentinelSharedFlush,
   status:()=>({...sentinelSharedLastStatus}),
   plan:()=>sentinelSharedDeltaPlan().plan
 };
-function sentinelSharedEnsureMinuteBaseline(){
-  // v0.4 migration guard:
-  // Existing local telemetry may already have been exported by v0.3 as 10-minute buckets.
-  // Baseline the current 1-minute snapshot once, so historical counts are not resent/double-counted.
-  try{
-    const raw=localStorage.getItem(SENTINEL_SHARED_STATE_KEY);
-    if(raw){
-      try{
-        const parsed=JSON.parse(raw);
-        if(parsed && parsed.version===SENTINEL_SHARED_VERSION && parsed.sent) return;
-      }catch(_){}
-    }
-    const baseline=sentinelSharedAggregateLocal();
-    sentinelSharedSaveState({
-      version:SENTINEL_SHARED_VERSION,
-      sent:JSON.parse(JSON.stringify(baseline)),
-      minuteBaselineAt:Date.now()
-    });
-  }catch(e){
-    console.warn("[SENTINEL] minute baseline init skipped",e);
-  }
-}
 sentinelSharedEnsureMinuteBaseline();
 setTimeout(()=>sentinelSharedFlush().finally(sentinelSharedSchedule),15000);
+
 document.addEventListener("visibilitychange",()=>{
-  if(document.visibilityState==="visible" && Date.now()-(sentinelSharedLastStatus.at||0)>SENTINEL_SHARED_SYNC_MS){
-    sentinelSharedFlush().catch(()=>{});
+  if(document.visibilityState==="visible"){
+    sentinelSharedResumeCheck("visibility");
+  }else{
+    if(sentinelSharedActivityTimer){
+      clearTimeout(sentinelSharedActivityTimer);
+      sentinelSharedActivityTimer=null;
+    }
+    // Best effort before iOS/PWA suspension; resume dispatch recovers leftovers.
+    if(navigator.onLine && !sentinelSharedBusy && sentinelSharedHasPending())
+      sentinelSharedFlush().catch(()=>{});
   }
 });
+window.addEventListener("pagehide",()=>{
+  if(navigator.onLine && !sentinelSharedBusy && sentinelSharedHasPending())
+    sentinelSharedFlush().catch(()=>{});
+});
+window.addEventListener("pageshow",()=>sentinelSharedResumeCheck("pageshow"));
+window.addEventListener("focus",()=>sentinelSharedResumeCheck("focus"));
+window.addEventListener("online",()=>sentinelSharedResumeCheck("online"));
 
 async function caesarGetRawDoc(segments){
   const headers = await caesarRestHeaders();
