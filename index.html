@@ -134,7 +134,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='1.5.3';
+const CAESAR_APP_VERSION='1.6.0';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -1081,6 +1081,66 @@ function caesarDocUrl(segments){
   return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/(default)/documents/${caesarPathEncode(segments)}`;
 }
 
+/* ==================================================================
+   起動時フルREAD省略用キャッシュ（meta/syncVersion + localStorage）
+   - 各コレクションへの書き込み成功時、bumpSyncVersion() で
+     meta/syncVersion の該当フィールドに更新時刻を記録する（write課金のみ、read消費なし）。
+   - 起動時はまず meta/syncVersion を1件だけ読み（read 1件）、
+     前回このブラウザで記録した値と一致するコレクションは、
+     localStorageに保存済みのデータをそのまま使い、Firestoreへは読みに行かない。
+   - 値が変わっていた／初回でキャッシュが無い場合だけ、従来通り全件取得する。
+   ================================================================== */
+const CAESAR_SYNC_CACHE_SCHEMA = "v1"; // キャッシュの形を変えたときは番号を上げて古いキャッシュを無効化する
+const CAESAR_SYNC_CACHE_COLLECTIONS = ["chemicals", "wasteCategories", "wasteEntries", "locations"];
+function caesarSyncCacheKey(name){ return `caesarSyncCache.${CAESAR_SYNC_CACHE_SCHEMA}.${name}`; }
+const CAESAR_SYNC_VERSION_CACHE_KEY = `caesarSyncVersionCache.${CAESAR_SYNC_CACHE_SCHEMA}`;
+
+function caesarCacheLoadJSON(key, fallback){
+  try{
+    const raw = localStorage.getItem(key);
+    if(raw == null) return fallback;
+    return JSON.parse(raw);
+  }catch(_){ return fallback; }
+}
+function caesarCacheSaveJSON(key, value){
+  try{ localStorage.setItem(key, JSON.stringify(value)); }
+  catch(e){ console.warn("キャッシュの保存に失敗（次回起動時は通常通り全件取得します）:", key, e); }
+}
+
+// 起動時に一度だけ meta/syncVersion を読み、ローカルキャッシュと比較する。
+// 戻り値: { versions, unchanged: Set<コレクション名> }
+async function caesarLoadSyncVersionCheck(){
+  let remote = null;
+  try{
+    const snap = await withDbTimeout(db.collection("meta").doc("syncVersion").get(), "syncVersion-get-timeout");
+    remote = snap.exists ? snap.data() : {};
+  }catch(e){
+    console.warn("syncVersionの確認に失敗（安全のため全件取得します）:", e);
+    return { versions:{}, unchanged: new Set() };
+  }
+  const cachedVersions = caesarCacheLoadJSON(CAESAR_SYNC_VERSION_CACHE_KEY, {});
+  const unchanged = new Set();
+  CAESAR_SYNC_CACHE_COLLECTIONS.forEach((name) => {
+    const remoteVal = remote ? remote[name] : undefined;
+    const cachedVal = cachedVersions[name];
+    const cachedData = caesarCacheLoadJSON(caesarSyncCacheKey(name), null);
+    if(remoteVal != null && cachedVal != null && remoteVal === cachedVal && Array.isArray(cachedData)){
+      unchanged.add(name);
+    }
+  });
+  return { versions: remote || {}, unchanged };
+}
+
+// 書き込みのたびに呼ぶ：該当コレクションの「最終更新」印を進める(readではなくwrite)。
+// これ自体が失敗しても本来の書き込みには影響させない（呼び出し側でcatch済み）。
+async function bumpSyncVersion(names){
+  const patch = {};
+  const now = new Date().toISOString();
+  (names || []).forEach((n) => { patch[n] = now; });
+  if(!Object.keys(patch).length) return;
+  await db.collection("meta").doc("syncVersion").set(patch, { merge: true });
+}
+
 
 /* ==================================================================
    SENTINEL Telemetry v0.2 / CAESAR
@@ -1523,7 +1583,11 @@ function abuseGuardStatus(){
     trips:abuseGuardTrips
   };
 }
-function abuseGuardCheck(reads,writes,kind){
+function abuseGuardCheck(reads,writes,kind,bulk){
+  // bulk=true は、バックアップ作成・復元などユーザーが明示的に行う管理用の
+  // 一括書き込み専用の抜け道。これらは元々「短時間に大量の書き込みが起きて当然」の
+  // 処理であり、暴走ループ検知用のこの仕組みの対象にすると誤動作するため対象外にする。
+  if(bulk) return;
   const now=abuseGuardNow();
   if(now<abuseGuardBlockedUntil){
     const e=new Error(`ABUSE_GUARD_COOLDOWN:${kind||"firestore"}:${abuseGuardBlockedUntil-now}ms`);
@@ -1566,8 +1630,9 @@ async function caesarGetRawDoc(segments){
   sentinelTelemetryRecord(1,0,0,"get-document");
   return raw ? JSON.parse(raw) : null;
 }
-async function caesarCommit(writes){
-  abuseGuardCheck(0,Array.isArray(writes)?writes.length:0,"caesar-commit");
+async function caesarCommit(writes, opts){
+  const bulk = !!(opts && opts.bulk);
+  abuseGuardCheck(0,Array.isArray(writes)?writes.length:0,"caesar-commit",bulk);
   if(!writes.length) return {};
   const quotaWait = caesarRestQuotaDelayRemaining();
   if(quotaWait > 0){
@@ -1808,6 +1873,35 @@ async function caesarRestLoadDocSub(sub, isInitial){
   }
 }
 
+// 現在購読中のコレクションのうち、指定した名前(パス)のものが持つ最新データを
+// { id, ...fields } の配列としてそのまま取り出す（追加のFirestore readは発生しない）。
+function caesarGetCachedRecordsForCollection(name){
+  for(const sub of caesarRestQuerySubscriptions){
+    if(!sub.stopped && sub.collectionRef._segments.join("/") === name){
+      return Array.from(sub.records.entries()).map(([id, data]) => ({ id, ...data }));
+    }
+  }
+  return null;
+}
+// 同様に、購読中のドキュメント（例: meta/settings）の最新データを取り出す。
+function caesarGetCachedDocData(pathKey){
+  for(const sub of caesarRestDocSubscriptions){
+    if(!sub.stopped && sub.ref._segments.join("/") === pathKey){
+      return sub.exists ? sub.data : null;
+    }
+  }
+  return null;
+}
+// 新規に全件取得できたコレクションの内容を、次回起動時の再取得省略のためlocalStorageへ保存する。
+function caesarPersistCollectionCache(name, records, versions){
+  caesarCacheSaveJSON(caesarSyncCacheKey(name), records);
+  if(versions && versions[name] != null){
+    const cachedVersions = caesarCacheLoadJSON(CAESAR_SYNC_VERSION_CACHE_KEY, {});
+    cachedVersions[name] = versions[name];
+    caesarCacheSaveJSON(CAESAR_SYNC_VERSION_CACHE_KEY, cachedVersions);
+  }
+}
+
 async function caesarRestRefreshAll(){
   const q = Array.from(caesarRestQuerySubscriptions).filter(s=>!s.stopped).map(s=>caesarRestLoadQuerySub(s, false));
   const d = Array.from(caesarRestDocSubscriptions).filter(s=>!s.stopped).map(s=>caesarRestLoadDocSub(s, false));
@@ -1849,6 +1943,22 @@ function caesarRestApplyCommittedWrites(writes){
   }
 }
 
+function caesarStartQuerySub(collectionRef, state, onNext, onError, seedRecords){
+  const sub = {collectionRef, state, onNext, onError, records: seedRecords ? new Map(seedRecords) : new Map(), stopped:false, failure:0, retryTimer:null};
+  caesarRestQuerySubscriptions.add(sub);
+  if(seedRecords){
+    // キャッシュ済みデータがある場合はネットワーク取得を省略し、即座にそれを反映する
+    caesarRestEmitQuerySub(sub);
+  }else{
+    caesarRestLoadQuerySub(sub, true).catch(()=>{});
+  }
+  return () => {
+    sub.stopped = true;
+    if(sub.retryTimer) clearTimeout(sub.retryTimer);
+    caesarRestQuerySubscriptions.delete(sub);
+  };
+}
+
 function caesarQueryRef(collectionRef, state){
   const base = {
     orders:[...((state && state.orders) || [])],
@@ -1860,16 +1970,9 @@ function caesarQueryRef(collectionRef, state){
     },
     limit(n){ return caesarQueryRef(collectionRef, {...base, limit:n}); },
     async get(){ return caesarRunQuery(collectionRef, base); },
-    onSnapshot(onNext, onError){
-      const sub = {collectionRef, state:base, onNext, onError, records:new Map(), stopped:false, failure:0, retryTimer:null};
-      caesarRestQuerySubscriptions.add(sub);
-      caesarRestLoadQuerySub(sub, true).catch(()=>{});
-      return () => {
-        sub.stopped=true;
-        if(sub.retryTimer) clearTimeout(sub.retryTimer);
-        caesarRestQuerySubscriptions.delete(sub);
-      };
-    }
+    onSnapshot(onNext, onError){ return caesarStartQuerySub(collectionRef, base, onNext, onError, null); },
+    // records: Map<id,data> のキャッシュを渡すと、初回のFirestore GET(read)を省略できる
+    onSnapshotSeeded(records, onNext, onError){ return caesarStartQuerySub(collectionRef, base, onNext, onError, records); }
   };
 }
 
@@ -1906,7 +2009,8 @@ function caesarCollectionRef(segments, topLevel){
     async get(){ return caesarRunQuery(ref, {orders:[], limit:null}); },
     orderBy(field, dir){ return caesarQueryRef(ref, {orders:[{field:String(field), dir:dir || "asc"}], limit:null}); },
     limit(n){ return caesarQueryRef(ref, {orders:[], limit:n}); },
-    onSnapshot(onNext, onError){ return caesarQueryRef(ref, {orders:[], limit:null}).onSnapshot(onNext, onError); }
+    onSnapshot(onNext, onError){ return caesarQueryRef(ref, {orders:[], limit:null}).onSnapshot(onNext, onError); },
+    onSnapshotSeeded(records, onNext, onError){ return caesarQueryRef(ref, {orders:[], limit:null}).onSnapshotSeeded(records, onNext, onError); }
   };
   return ref;
 }
@@ -1915,13 +2019,14 @@ const caesarRestDb = {
   collection(name){
     return caesarCollectionRef([String(name)], true);
   },
-  batch(){
+  batch(opts){
+    const bulk = !!(opts && opts.bulk);
     const writes = [];
     return {
       set(ref, data, opts){ writes.push(caesarSetWrite(ref._segments, data, !!(opts && opts.merge))); return this; },
       update(ref, data){ writes.push(caesarSetWrite(ref._segments, data, true)); return this; },
       delete(ref){ writes.push(caesarDeleteWrite(ref._segments)); return this; },
-      async commit(){ return caesarCommit(writes); }
+      async commit(){ return caesarCommit(writes, {bulk}); }
     };
   }
 };
@@ -1996,6 +2101,7 @@ async function seedIfNeeded() {
 
   batch.set(flagRef, { seeded: true });
   await withDbTimeout(batch.commit(), "seed-commit-timeout");
+  await bumpSyncVersion(["chemicals", "wasteCategories", "wasteEntries"]).catch((e) => console.warn("seed後のsyncVersion更新に失敗:", e));
 }
 
 // Excel薬品台帳のFirestoreへの初回インポートは完了済み。
@@ -2022,6 +2128,7 @@ async function fixEvansBlueFullStatusIfNeeded() {
   const snap = await withDbTimeout(ref.get(), "evansBlue-get-timeout");
   if (snap.exists && snap.data().stock && snap.data().stock.known === false && snap.data().stock.status !== "full") {
     await withDbTimeout(ref.update({ "stock.status": "full" }), "evansBlue-update-timeout");
+    await bumpSyncVersion(["chemicals"]).catch((e) => console.warn("evansBlue補正後のsyncVersion更新に失敗:", e));
   }
 }
 
@@ -2043,11 +2150,13 @@ function chunkArray(arr, size) {
   return out;
 }
 
-// 「batchに1件積む処理」の配列を、上限件数ごとに分けて順番にcommitする
+// バックアップ作成・復元・ローテーションはすべてここを通る一括コミット経路。
+// これらは「短時間に大量の書き込みが発生して当然」の管理用処理なので、
+// 通常操作の暴走ループ検知用のABUSE GUARDの対象から外す(bulk:true)。
 async function commitOpsInChunks(ops) {
   const chunks = chunkArray(ops, BACKUP_BATCH_SIZE);
   for (const chunk of chunks) {
-    const batch = db.batch();
+    const batch = db.batch({ bulk: true });
     chunk.forEach((apply) => apply(batch));
     await withDbTimeout(batch.commit(), "backupChunk-commit-timeout");
   }
@@ -2056,6 +2165,16 @@ async function commitOpsInChunks(ops) {
 // 取得済みのQuerySnapshotの内容を、そのままの id で別のコレクションに複製する
 async function copyDocsInto(sourceDocs, targetCollectionRef) {
   const ops = sourceDocs.map((d) => (batch) => batch.set(targetCollectionRef.doc(d.id), d.data()));
+  await commitOpsInChunks(ops);
+}
+
+// copyDocsIntoの、Firestoreスナップショットではなく「すでにメモリ上にある { id, ...fields } の配列」版。
+// バックアップをFirestoreへ再度読みに行かず、この端末がすでに持っているデータをそのまま複製するために使う。
+async function copyRecordsInto(records, targetCollectionRef) {
+  const ops = records.map((r) => {
+    const { id, ...fields } = r;
+    return (batch) => batch.set(targetCollectionRef.doc(id), fields);
+  });
   await commitOpsInChunks(ops);
 }
 
@@ -2068,32 +2187,36 @@ async function deleteAllInCollection(collectionRef) {
 
 // 現在のデータ一式をスナップショットとして「backups」コレクションへ保存する。
 // type: "auto"（自動・1日1回）｜ "manual"（管理者が手動で作成）
-async function createBackupSnapshot(type) {
-  const [chemSnap, wasteSnap, entriesSnap, locSnap, settingsSnap] = await Promise.all([
-    withDbTimeout(db.collection("chemicals").get(), "backupSnapshot-chemicals-get-timeout"),
-    withDbTimeout(db.collection("wasteCategories").get(), "backupSnapshot-wasteCategories-get-timeout"),
-    withDbTimeout(db.collection("wasteEntries").get(), "backupSnapshot-wasteEntries-get-timeout"),
-    withDbTimeout(db.collection("locations").get(), "backupSnapshot-locations-get-timeout"),
-    withDbTimeout(db.collection("meta").doc("settings").get(), "backupSnapshot-settings-get-timeout"),
-  ]);
+// data: { chemDocs, wasteDocs, entriesDocs, locDocs, settingsData } —
+//       いずれも呼び出し元がすでに読み込み済みの内容をそのまま渡す（ここでは追加のreadを一切行わない）。
+async function createBackupSnapshot(type, data) {
+  const { chemDocs, wasteDocs, entriesDocs, locDocs, settingsData } = data;
+
+  // 「保管場所の件数」は locations コレクションの生件数ではなく、
+  // 画面の場所タブと同じロジック（薬品由来の場所＋空のまま追加された場所の合算）で数える。
+  // locations コレクションは「追加」または「編集」されたことがある場所しか持たないため、
+  // 生件数のままだと実際の場所の種類数より大幅に少なく出てしまう。
+  const locationKeys = new Set();
+  chemDocs.forEach((c) => { if (c.location) locationKeys.add(locationMergeKey(c.location)); });
+  locDocs.forEach((l) => locationKeys.add(locationMergeKey(l)));
 
   const backupRef = db.collection("backups").doc();
   await withDbTimeout(backupRef.set({
     createdAt: new Date().toISOString(),
     type,
     counts: {
-      chemicals: chemSnap.size,
-      wasteCategories: wasteSnap.size,
-      wasteEntries: entriesSnap.size,
-      locations: locSnap.size,
+      chemicals: chemDocs.length,
+      wasteCategories: wasteDocs.length,
+      wasteEntries: entriesDocs.length,
+      locations: locationKeys.size,
     },
-    settings: settingsSnap.exists ? settingsSnap.data() : {},
+    settings: settingsData || {},
   }), "backupSnapshot-set-timeout");
 
-  await copyDocsInto(chemSnap.docs, backupRef.collection("chemicals"));
-  await copyDocsInto(wasteSnap.docs, backupRef.collection("wasteCategories"));
-  await copyDocsInto(entriesSnap.docs, backupRef.collection("wasteEntries"));
-  await copyDocsInto(locSnap.docs, backupRef.collection("locations"));
+  await copyRecordsInto(chemDocs, backupRef.collection("chemicals"));
+  await copyRecordsInto(wasteDocs, backupRef.collection("wasteCategories"));
+  await copyRecordsInto(entriesDocs, backupRef.collection("wasteEntries"));
+  await copyRecordsInto(locDocs, backupRef.collection("locations"));
 
   return backupRef.id;
 }
@@ -2135,14 +2258,26 @@ async function rotateOldBackups() {
   }
 }
 
+// バックアップに使うwasteEntriesを確保する。廃液タブ等をすでに開いていて購読中なら
+// それ（メモリ上のデータ）をそのまま使い、追加readなしで済ませる。
+// まだ一度も開いておらず購読が無い場合だけ、バックアップのためにその場で1回だけ取得する
+// （自動バックアップは1日1回程度しか実行されないため、発生してもごく小さいコスト）。
+async function getWasteEntriesForBackup() {
+  const cached = caesarGetCachedRecordsForCollection("wasteEntries");
+  if (cached) return cached;
+  const snap = await withDbTimeout(db.collection("wasteEntries").get(), "backup-wasteEntries-fallback-get-timeout");
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
 // 前回の自動バックアップから一定時間（1時間）経っていれば新しくバックアップを作る。
 // アプリ起動時に加えて、開きっぱなしのセッション中も定期的に呼び出される。
-async function autoBackupIfNeeded() {
+// data: createBackupSnapshotへそのまま渡す、呼び出し元がすでに読み込み済みのデータ一式。
+async function autoBackupIfNeeded(data) {
   const stateRef = db.collection("meta").doc("backupState");
   const stateSnap = await withDbTimeout(stateRef.get(), "autoBackupState-get-timeout");
   const last = stateSnap.exists ? stateSnap.data().lastAutoBackupAt : null;
   if (last && Date.now() - new Date(last).getTime() < AUTO_BACKUP_INTERVAL_MS) return;
-  await createBackupSnapshot("auto");
+  await createBackupSnapshot("auto", data);
   await withDbTimeout(stateRef.set({ lastAutoBackupAt: new Date().toISOString() }, { merge: true }), "autoBackupState-set-timeout");
   await rotateOldBackups();
 }
@@ -2173,6 +2308,12 @@ async function restoreFromBackup(backupId) {
   if (settings && settings.passcode) {
     await withDbTimeout(db.collection("meta").doc("settings").set({ passcode: settings.passcode }, { merge: true }), "restore-passcode-set-timeout");
   }
+
+  // 復元は通常の書き込みハンドラを経由しないため、明示的にsyncVersionを進めておく。
+  // （これをしないと、この端末や他端末が「変更なし」と誤判定してキャッシュを使い続けてしまう）
+  await bumpSyncVersion(["chemicals", "wasteCategories", "wasteEntries", "locations"]).catch((e) =>
+    console.warn("復元後のsyncVersion更新に失敗:", e)
+  );
 }
 
 // バックアップの日時をアプリ内表示用に整形する
@@ -5194,6 +5335,10 @@ const [passcodeGate, setPasscodeGate] = useState(null);
 const [adminPasscode, setAdminPasscode] = useState(DEFAULT_ADMIN_PASSCODE);
 const [theme, setTheme] = useState("light");
 const startupThemeAppliedRef = React.useRef(false);
+// wasteEntries（投入記録）は起動時のsyncVersion確認結果をここに保持しておき、
+// 廃液関連画面を実際に開いた時（下のuseEffect）に、追加の全件読み直しをせず参照する。
+const syncCheckRef = React.useRef({ versions: {}, unchanged: new Set() });
+const wasteEntriesSubRef = React.useRef({ started: false, unsub: null });
 Object.assign(C, theme === "dark" ? DARK_TOKENS : LIGHT_TOKENS);
 useEffect(() => {
   document.documentElement.dataset.theme = theme;
@@ -5256,6 +5401,16 @@ const toggleTheme = () => {
     try {
       const count = await caesarRestRefreshAll();
       showToast(count ? "最新データに更新しました" : "更新対象はありません");
+      try {
+        const verSnap = await withDbTimeout(db.collection("meta").doc("syncVersion").get(), "syncVersion-refresh-get-timeout");
+        const versions = verSnap.exists ? verSnap.data() : {};
+        CAESAR_SYNC_CACHE_COLLECTIONS.forEach((name) => {
+          const records = caesarGetCachedRecordsForCollection(name);
+          if (records) caesarPersistCollectionCache(name, records, versions);
+        });
+      } catch (cacheErr) {
+        console.warn("更新後のキャッシュ保存に失敗（次回起動時に該当分を再取得します）:", cacheErr);
+      }
     } catch (e) {
       if (caesarRestIsQuotaError(e)) {
         showToast("Firestoreのread上限に近いため、更新を一時停止しています", true);
@@ -5269,16 +5424,36 @@ const toggleTheme = () => {
   // どこで失敗しても画面が真っ白にならないよう、必ずエラーを画面に出す。
   useEffect(() => {
     if (firebaseInitError) return;
-    let unsubChem, unsubWaste, unsubEntries, unsubSettings, unsubLocations;
+    let unsubChem, unsubWaste, unsubSettings, unsubLocations;
     let cancelled = false;
 
     const unsubAll = () => {
       if (unsubChem) { unsubChem(); unsubChem = null; }
       if (unsubWaste) { unsubWaste(); unsubWaste = null; }
-      if (unsubEntries) { unsubEntries(); unsubEntries = null; }
       if (unsubSettings) { unsubSettings(); unsubSettings = null; }
       if (unsubLocations) { unsubLocations(); unsubLocations = null; }
     };
+
+    // 起動時の自動バックアップは、chemicals/wasteCategories/locations/settingsの
+    // 初回ロードが揃ってから行う。wasteEntriesは廃液タブを開くまで遅延読込にするため、
+    // ここでは待たない（バックアップ自体は getWasteEntriesForBackup() で別途確保する）。
+    const startupCollected = { chemicals: undefined, wasteCategories: undefined, locations: undefined, settings: undefined };
+    let startupBackupTriggered = false;
+    function maybeTriggerStartupBackup() {
+      if (startupBackupTriggered) return;
+      const s = startupCollected;
+      if (s.chemicals === undefined || s.wasteCategories === undefined || s.locations === undefined || s.settings === undefined) return;
+      startupBackupTriggered = true;
+      getWasteEntriesForBackup()
+        .then((entriesDocs) => autoBackupIfNeeded({
+          chemDocs: s.chemicals,
+          wasteDocs: s.wasteCategories,
+          entriesDocs,
+          locDocs: s.locations,
+          settingsData: s.settings,
+        }))
+        .catch((err) => console.warn("起動後の自動バックアップチェックに失敗:", err));
+    }
 
     // 特定OS(端末)で通信が単発で詰まり、読み込み画面から進まなくなる不具合の対策。
     // 一定時間で強制タイムアウトさせ、1回だけ裏で自動的に最初からやり直す。
@@ -5311,7 +5486,11 @@ const toggleTheme = () => {
 
       setLoadingStep(currentStep);
       ensureSignedIn()
-        .then(() => {
+        // meta/syncVersion を1件だけ読み、前回このブラウザで記録した値と比べる。
+        // 変わっていないコレクションは、あとでlocalStorageのキャッシュをそのまま使い、
+        // Firestoreへの全件読み込みそのものを省略する。
+        .then(() => caesarLoadSyncVersionCheck())
+        .then((syncCheck) => {
           markStep("薬品データ取得中…");
           if (cancelled) return;
 
@@ -5324,50 +5503,90 @@ const toggleTheme = () => {
           seedIfNeeded()
             .then(() => syncExcelInventoryIfNeeded())
             .then(() => fixEvansBlueFullStatusIfNeeded())
-            .then(() => autoBackupIfNeeded())
             .catch((err) => console.warn("起動時の初期化/移行チェックに失敗（本体表示には影響なし）:", err));
 
-          unsubChem = db.collection("chemicals").onSnapshot(
-            (snap) => {
-              clearStartupTimeout();
-              setChemicals(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-              applySystemThemeAfterStartup();
-              setLoading(false);
-            },
-            (err) => {
-              clearStartupTimeout();
-              console.error("chemicals subscription error", err);
-              if(!caesarRestIsQuotaError(err)) setFatalError("薬品データの取得に失敗しました：" + err.message);
-              setLoading(false);
+          let chemFirstLoadDone = false;
+          const onChemNext = (snap) => {
+            clearStartupTimeout();
+            const records = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+            setChemicals(records);
+            applySystemThemeAfterStartup();
+            setLoading(false);
+            if (!chemFirstLoadDone) {
+              chemFirstLoadDone = true;
+              startupCollected.chemicals = records;
+              if (!syncCheck.unchanged.has("chemicals")) caesarPersistCollectionCache("chemicals", records, syncCheck.versions);
+              maybeTriggerStartupBackup();
             }
-          );
-          unsubWaste = db.collection("wasteCategories").onSnapshot(
-            (snap) => setWasteMeta(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-            (err) => {
-              console.error("wasteCategories subscription error", err);
-              if(!caesarRestIsQuotaError(err)) setFatalError("廃液分類データの取得に失敗しました：" + err.message);
+          };
+          const onChemError = (err) => {
+            clearStartupTimeout();
+            console.error("chemicals subscription error", err);
+            if(!caesarRestIsQuotaError(err)) setFatalError("薬品データの取得に失敗しました：" + err.message);
+            setLoading(false);
+            if (!chemFirstLoadDone) { chemFirstLoadDone = true; startupCollected.chemicals = []; maybeTriggerStartupBackup(); }
+          };
+          unsubChem = syncCheck.unchanged.has("chemicals")
+            ? db.collection("chemicals").onSnapshotSeeded(new Map(caesarCacheLoadJSON(caesarSyncCacheKey("chemicals"), []).map((r) => [r.id, r])), onChemNext, onChemError)
+            : db.collection("chemicals").onSnapshot(onChemNext, onChemError);
+
+          let wasteFirstLoadDone = false;
+          const onWasteNext = (snap) => {
+            const records = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+            setWasteMeta(records);
+            if (!wasteFirstLoadDone) {
+              wasteFirstLoadDone = true;
+              startupCollected.wasteCategories = records;
+              if (!syncCheck.unchanged.has("wasteCategories")) caesarPersistCollectionCache("wasteCategories", records, syncCheck.versions);
+              maybeTriggerStartupBackup();
             }
-          );
-          unsubEntries = db.collection("wasteEntries").onSnapshot(
-            (snap) => setWasteEntriesRaw(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-            (err) => {
-              console.error("wasteEntries subscription error", err);
-              if(!caesarRestIsQuotaError(err)) setFatalError("廃液記録データの取得に失敗しました：" + err.message);
-            }
-          );
+          };
+          const onWasteError = (err) => {
+            console.error("wasteCategories subscription error", err);
+            if(!caesarRestIsQuotaError(err)) setFatalError("廃液分類データの取得に失敗しました：" + err.message);
+            if (!wasteFirstLoadDone) { wasteFirstLoadDone = true; startupCollected.wasteCategories = []; maybeTriggerStartupBackup(); }
+          };
+          unsubWaste = syncCheck.unchanged.has("wasteCategories")
+            ? db.collection("wasteCategories").onSnapshotSeeded(new Map(caesarCacheLoadJSON(caesarSyncCacheKey("wasteCategories"), []).map((r) => [r.id, r])), onWasteNext, onWasteError)
+            : db.collection("wasteCategories").onSnapshot(onWasteNext, onWasteError);
+
+          // wasteEntries（投入記録）は起動時には読み込まない。件数が積み上がっていく
+          // 一番reads的に重くなりうるコレクションなので、廃液タブ等を実際に開いた
+          // タイミングで初めて読み込む（下の別のuseEffectを参照）。
+          syncCheckRef.current = syncCheck;
+
+          let settingsFirstLoadDone = false;
           unsubSettings = db.collection("meta").doc("settings").onSnapshot(
             (snap) => {
-              if (snap.exists && snap.data().passcode) {
-                setAdminPasscode(snap.data().passcode);
-              }
+              const data = snap.exists ? snap.data() : {};
+              if (data && data.passcode) setAdminPasscode(data.passcode);
+              if (!settingsFirstLoadDone) { settingsFirstLoadDone = true; startupCollected.settings = data || {}; maybeTriggerStartupBackup(); }
             },
-            (err) => console.error("settings subscription error", err)
+            (err) => {
+              console.error("settings subscription error", err);
+              if (!settingsFirstLoadDone) { settingsFirstLoadDone = true; startupCollected.settings = {}; maybeTriggerStartupBackup(); }
+            }
           );
+
           // 「場所を追加」で作った、まだ薬品が無い保管場所を保持するコレクション
-          unsubLocations = db.collection("locations").onSnapshot(
-            (snap) => setLocationsMeta(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-            (err) => console.error("locations subscription error", err)
-          );
+          let locationsFirstLoadDone = false;
+          const onLocationsNext = (snap) => {
+            const records = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+            setLocationsMeta(records);
+            if (!locationsFirstLoadDone) {
+              locationsFirstLoadDone = true;
+              startupCollected.locations = records;
+              if (!syncCheck.unchanged.has("locations")) caesarPersistCollectionCache("locations", records, syncCheck.versions);
+              maybeTriggerStartupBackup();
+            }
+          };
+          const onLocationsError = (err) => {
+            console.error("locations subscription error", err);
+            if (!locationsFirstLoadDone) { locationsFirstLoadDone = true; startupCollected.locations = []; maybeTriggerStartupBackup(); }
+          };
+          unsubLocations = syncCheck.unchanged.has("locations")
+            ? db.collection("locations").onSnapshotSeeded(new Map(caesarCacheLoadJSON(caesarSyncCacheKey("locations"), []).map((r) => [r.id, r])), onLocationsNext, onLocationsError)
+            : db.collection("locations").onSnapshot(onLocationsNext, onLocationsError);
         })
         .catch((err) => {
           clearStartupTimeout();
@@ -5393,9 +5612,18 @@ const toggleTheme = () => {
   // 起動時のチェックだけだと「開きっぱなしのタブ」では次に誰かがアプリを開くまで
   // バックアップが作られない。AUTO_BACKUP_INTERVAL_MS（24時間）おきにも
   // チェックし直すことで、長時間開いたままのセッションでも定期的に残るようにする。
+  // ここでも、購読中のデータをそのまま使うだけで新たな全件readは発生させない。
   useEffect(() => {
     const timer = setInterval(() => {
-      autoBackupIfNeeded().catch((err) => console.warn("定期バックアップチェックに失敗:", err));
+      getWasteEntriesForBackup()
+        .then((entriesDocs) => autoBackupIfNeeded({
+          chemDocs: caesarGetCachedRecordsForCollection("chemicals") || [],
+          wasteDocs: caesarGetCachedRecordsForCollection("wasteCategories") || [],
+          entriesDocs,
+          locDocs: caesarGetCachedRecordsForCollection("locations") || [],
+          settingsData: caesarGetCachedDocData("meta/settings") || {},
+        }))
+        .catch((err) => console.warn("定期バックアップチェックに失敗:", err));
     }, AUTO_BACKUP_INTERVAL_MS);
     return () => clearInterval(timer);
   }, []);
@@ -5408,6 +5636,40 @@ const toggleTheme = () => {
   );
 
   const current = stack[stack.length - 1];
+
+  // wasteEntries（投入記録）は、廃液関連の画面を実際に開くまで購読を開始しない。
+  // 薬品側の画面（検索・詳細・編集・追加）はどれもこのデータを使わないため、
+  // ここで初めて読み込んでも薬品側の表示には影響しない。
+  useEffect(() => {
+    const WASTE_ENTRIES_NEEDED_VIEWS = new Set(["waste", "wasteArchive", "wasteSubstance", "wasteEntry", "wasteEntryAdd", "addWaste"]);
+    const needed = homeTab === "waste" || WASTE_ENTRIES_NEEDED_VIEWS.has(current.view);
+    if (!needed || wasteEntriesSubRef.current.started) return;
+    wasteEntriesSubRef.current.started = true;
+
+    const syncCheck = syncCheckRef.current;
+    let firstLoadDone = false;
+    const onNext = (snap) => {
+      const records = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setWasteEntriesRaw(records);
+      if (!firstLoadDone) {
+        firstLoadDone = true;
+        if (!syncCheck.unchanged.has("wasteEntries")) caesarPersistCollectionCache("wasteEntries", records, syncCheck.versions);
+      }
+    };
+    const onError = (err) => {
+      console.error("wasteEntries subscription error", err);
+      if (!caesarRestIsQuotaError(err)) setFatalError("廃液記録データの取得に失敗しました：" + err.message);
+    };
+    wasteEntriesSubRef.current.unsub = syncCheck.unchanged.has("wasteEntries")
+      ? db.collection("wasteEntries").onSnapshotSeeded(new Map(caesarCacheLoadJSON(caesarSyncCacheKey("wasteEntries"), []).map((r) => [r.id, r])), onNext, onError)
+      : db.collection("wasteEntries").onSnapshot(onNext, onError);
+  }, [homeTab, current.view]);
+
+  useEffect(() => {
+    return () => {
+      if (wasteEntriesSubRef.current.unsub) wasteEntriesSubRef.current.unsub();
+    };
+  }, []);
 
   const push = (entry) => setStack((s) => [...s, entry]);
   const pop = () => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
@@ -5422,6 +5684,7 @@ const toggleTheme = () => {
     const newAmount = Math.max(0, +remaining.toFixed(2));
     try{
       await withDbTimeout(db.collection("chemicals").doc(chemId).update({ "stock.amount": newAmount }), "saveMass-update-timeout");
+      bumpSyncVersion(["chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
     }catch(e){ toastFail("残量の保存", e); }
   };
 
@@ -5434,6 +5697,7 @@ const toggleTheme = () => {
       await withDbTimeout(db.collection("chemicals").doc(chem.id).update({
         stock: { amount: 0, capacity: 0, unit: "g", known: true, status: "empty" },
       }), "markNoStock-update-timeout");
+      bumpSyncVersion(["chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
     }catch(e){ toastFail("在庫なしの記録", e); }
   };
 
@@ -5518,6 +5782,7 @@ const toggleTheme = () => {
         .collection("chemicals")
         .doc(newId)
         .set({ name, formula: formula || "", cas: cas || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null, openDate: openDate || "" }), "addChemical-set-timeout");
+      bumpSyncVersion(["chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
       pop();
     }catch(e){ toastFail("薬品の追加", e); }
   };
@@ -5536,6 +5801,7 @@ const toggleTheme = () => {
     if (stock) updates.stock = stock;
     try{
       await withDbTimeout(db.collection("chemicals").doc(chem.id).update(updates), "editChemical-update-timeout");
+      bumpSyncVersion(["chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
       pop();
     }catch(e){ toastFail("薬品情報の保存", e); }
   };
@@ -5560,6 +5826,7 @@ const toggleTheme = () => {
     });
     try{
       await withDbTimeout(batch.commit(), "editLocation-commit-timeout");
+      bumpSyncVersion(["chemicals", "locations"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
       pop();
     }catch(e){ toastFail("場所情報の保存", e); }
   };
@@ -5569,6 +5836,7 @@ const toggleTheme = () => {
     const maxOrder = Math.max(-1, ...locationsMeta.map((l) => (typeof l.order === "number" ? l.order : -1)));
     try{
       await withDbTimeout(db.collection("locations").doc(id).set({ name, note: note || "", order: maxOrder + 1 }), "addLocation-set-timeout");
+      bumpSyncVersion(["locations"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
       goHome("location");
     }catch(e){ toastFail("場所の追加", e); }
   };
@@ -5579,6 +5847,7 @@ const toggleTheme = () => {
     }
     try{
       await withDbTimeout(db.collection("chemicals").doc(chem.id).delete(), "deleteChemical-delete-timeout");
+      bumpSyncVersion(["chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
       pop();
     }catch(e){ toastFail("薬品の削除", e); }
   };
@@ -5590,6 +5859,9 @@ const toggleTheme = () => {
       const cat = wasteMeta.find((w) => w.id === wasteId);
       if (cat && !cat.tankStartDate) {
         await withDbTimeout(db.collection("wasteCategories").doc(wasteId).update({ tankStartDate: entry.date }), "addWasteEntry-updateTankStart-timeout");
+        bumpSyncVersion(["wasteEntries", "wasteCategories"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+      } else {
+        bumpSyncVersion(["wasteEntries"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
       }
       pop();
     }catch(e){ toastFail("投入記録の保存", e); }
@@ -5601,6 +5873,7 @@ const toggleTheme = () => {
     }
     try{
       await withDbTimeout(db.collection("wasteEntries").doc(entry.id).delete(), "deleteWasteEntry-delete-timeout");
+      bumpSyncVersion(["wasteEntries"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
       pop();
     }catch(e){ toastFail("投入記録の削除", e); }
   };
@@ -5646,6 +5919,7 @@ const handleDisposeWaste = (waste) => {
 
       try{
         await withDbTimeout(batch.commit(), "disposeWaste-commit-timeout");
+        bumpSyncVersion(["wasteCategories", "chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
         setPasscodeGate(null);
         goHome("waste");
       }catch(e){
@@ -5672,6 +5946,7 @@ const handleAddWasteCategory = ({ code, name, note, color }) => {
           disposal: DISPOSAL_POLICY,
           tankStartDate: null,
         }), "addWasteCategory-set-timeout");
+        bumpSyncVersion(["wasteCategories"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
         setPasscodeGate(null);
         goHome("waste");
       }catch(e){
@@ -5720,6 +5995,7 @@ const handleDeleteWasteCategories = (wastes) => {
         });
         try{
           await withDbTimeout(batch.commit(), "deleteWasteCategories-commit-timeout");
+          bumpSyncVersion(["wasteCategories", "wasteEntries"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
           setPasscodeGate(null);
           resolve(true);
         }catch(e){
