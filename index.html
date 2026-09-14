@@ -134,7 +134,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='1.6.3';
+const CAESAR_APP_VERSION='1.6.4';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -904,6 +904,7 @@ const CAESAR_REST_BACKOFF_MS = [4000, 10000, 30000, 60000];
 const CAESAR_REST_QUOTA_BACKOFF_MS = [60000, 120000, 300000, 900000];
 
 let caesarRestIdToken = "";
+let caesarRestIdTokenExpiresAt = 0;
 let caesarRestRefreshToken = "";
 let caesarRestAuthReady = false;
 let caesarRestPollFailureCount = 0;
@@ -960,6 +961,7 @@ async function caesarRestAuthRequest(){
       caesarRestIdToken = data.id_token || "";
       caesarRestRefreshToken = data.refresh_token || saved;
       if(!caesarRestIdToken) throw new Error("REST Auth refresh: ID token missing");
+      caesarRestIdTokenExpiresAt = Date.now() + (Number(data.expires_in) || 3600) * 1000 - 300000;
       localStorage.setItem(CAESAR_REST_REFRESH_KEY, caesarRestRefreshToken);
       caesarRestAuthReady = true;
       return true;
@@ -980,6 +982,7 @@ async function caesarRestAuthRequest(){
   caesarRestIdToken = data.idToken || "";
   caesarRestRefreshToken = data.refreshToken || "";
   if(!caesarRestIdToken) throw new Error("REST Auth signUp: ID token missing");
+  caesarRestIdTokenExpiresAt = Date.now() + (Number(data.expiresIn) || 3600) * 1000 - 300000;
   if(caesarRestRefreshToken) localStorage.setItem(CAESAR_REST_REFRESH_KEY, caesarRestRefreshToken);
   caesarRestAuthReady = true;
   return true;
@@ -997,7 +1000,7 @@ async function caesarGetAppCheckToken(){
 }
 
 async function caesarRestHeaders(){
-  if(!caesarRestIdToken) await caesarRestAuthRequest();
+  if(!caesarRestIdToken || Date.now() >= caesarRestIdTokenExpiresAt) await caesarRestAuthRequest();
   const headers = {
     "Authorization": "Bearer " + caesarRestIdToken,
     "Content-Type": "application/json"
