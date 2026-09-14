@@ -134,7 +134,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='1.6.2';
+const CAESAR_APP_VERSION='1.6.3';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -1922,8 +1922,9 @@ function caesarPersistCollectionCache(name, records, versions){
   }
 }
 
-async function caesarRestRefreshAll(){
-  const q = Array.from(caesarRestQuerySubscriptions).filter(s=>!s.stopped).map(s=>caesarRestLoadQuerySub(s, false));
+async function caesarRestRefreshAll(skipNames){
+  const skip = skipNames || new Set();
+  const q = Array.from(caesarRestQuerySubscriptions).filter(s=>!s.stopped && !skip.has(s.collectionRef._segments.join("/"))).map(s=>caesarRestLoadQuerySub(s, false));
   const d = Array.from(caesarRestDocSubscriptions).filter(s=>!s.stopped).map(s=>caesarRestLoadDocSub(s, false));
   const results = await Promise.allSettled([...q,...d]);
   const bad = results.find(r=>r.status==="rejected");
@@ -5419,12 +5420,16 @@ const toggleTheme = () => {
 
   const handleManualRefresh = async () => {
     try {
-      const count = await caesarRestRefreshAll();
-      showToast(count ? "最新データに更新しました" : "更新対象はありません");
+      const { versions, unchanged } = await caesarLoadSyncVersionCheck();
+      const count = await caesarRestRefreshAll(unchanged);
+      if (unchanged.size >= CAESAR_SYNC_CACHE_COLLECTIONS.length) {
+        showToast("変更はありませんでした");
+      } else {
+        showToast(count ? "最新データに更新しました" : "更新対象はありません");
+      }
       try {
-        const verSnap = await withDbTimeout(db.collection("meta").doc("syncVersion").get(), "syncVersion-refresh-get-timeout");
-        const versions = verSnap.exists ? verSnap.data() : {};
         CAESAR_SYNC_CACHE_COLLECTIONS.forEach((name) => {
+          if (unchanged.has(name)) return; // 既にキャッシュと一致済みなので保存し直す必要はない
           const records = caesarGetCachedRecordsForCollection(name);
           if (records) caesarPersistCollectionCache(name, records, versions);
         });
