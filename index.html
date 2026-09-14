@@ -134,7 +134,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='1.6.4';
+const CAESAR_APP_VERSION='1.6.5';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -1110,6 +1110,55 @@ function caesarCacheSaveJSON(key, value){
   catch(e){ console.warn("キャッシュの保存に失敗（次回起動時は通常通り全件取得します）:", key, e); }
 }
 
+// ── 差分同期（delta sync） ─────────────────────────────────────────
+// コレクション全体の版が変わっただけで全件を読み直すのを避けるため、
+// ドキュメント単位の _updatedAt を見て「前回同期以降に変わった分だけ」を取得する。
+// 削除は _updatedAt では検知できないため、削除時には自動で
+// 「tombstones_<コレクション名>」に削除記録を残し（caesarAugmentWritesWithTombstones）、
+// 差分取得のたびにそちらも合わせて問い合わせて即座に反映する（ラグなし）。
+const CAESAR_SYNC_META_KEY = `caesarSyncMeta.${CAESAR_SYNC_CACHE_SCHEMA}`;
+// トゥームストーン方式で削除も含めて正確に同期できるので、この間隔は「万一のズレ」に備えた
+// 保険的な定期フル同期であり、正しさのために必須ではない（かなり長めでよい）。
+const CAESAR_FULL_RESYNC_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000;
+function caesarSyncMetaLoad(){ return caesarCacheLoadJSON(CAESAR_SYNC_META_KEY, {}); }
+function caesarSyncMetaSave(meta){ caesarCacheSaveJSON(CAESAR_SYNC_META_KEY, meta); }
+// 全件取得を行った直後に呼ぶ：差分カーソルとフル同期時刻を両方リセットする。
+function caesarSyncMetaMarkFull(name){
+  const meta = caesarSyncMetaLoad();
+  const now = new Date().toISOString();
+  meta[name] = { cursor: now, fullSyncAt: now };
+  caesarSyncMetaSave(meta);
+}
+// 差分同期が使える状況かどうかを判定する。使えない（=全件取得すべき）場合は null。
+function caesarDeltaCursor(name){
+  if(!CAESAR_SYNC_CACHE_COLLECTIONS.includes(name)) return null;
+  const meta = caesarSyncMetaLoad()[name];
+  if(!meta || !meta.cursor) return null;
+  const fullDue = !meta.fullSyncAt || (Date.now() - new Date(meta.fullSyncAt).getTime()) > CAESAR_FULL_RESYNC_INTERVAL_MS;
+  if(fullDue) return null;
+  return meta.cursor;
+}
+// 前回カーソル以降の「編集/追加」と「削除」を両方問い合わせ、localMap(Map<id,data>)へ
+// その場でマージする。呼べない状況（初回など）ならnullを返すので、呼び出し側は全件取得にフォールバックする。
+async function caesarRunDeltaSync(name, localMap){
+  const cursor = caesarDeltaCursor(name);
+  if(!cursor) return null;
+  const syncStartedAt = new Date().toISOString();
+  const editState = { orders:[], limit:null, filters:[{field:"_updatedAt", op:">", value:cursor}] };
+  const delState = { orders:[], limit:null, filters:[{field:"deletedAt", op:">", value:cursor}] };
+  const [editSnap, delSnap] = await Promise.all([
+    caesarRunQuery(db.collection(name), editState),
+    caesarRunQuery(db.collection("tombstones_" + name), delState)
+  ]);
+  editSnap.docs.forEach(d => localMap.set(d.id, caesarRestDeepClone(d.data())));
+  delSnap.docs.forEach(d => localMap.delete(d.id));
+  const meta = caesarSyncMetaLoad();
+  const prev = meta[name] || {};
+  meta[name] = { cursor: syncStartedAt, fullSyncAt: prev.fullSyncAt || syncStartedAt };
+  caesarSyncMetaSave(meta);
+  return { editCount: editSnap.docs.length, delCount: delSnap.docs.length };
+}
+
 // 起動時に一度だけ meta/syncVersion を読み、ローカルキャッシュと比較する。
 // 戻り値: { versions, unchanged: Set<コレクション名> }
 async function caesarLoadSyncVersionCheck(){
@@ -1653,10 +1702,26 @@ async function caesarGetRawDoc(segments){
   sentinelTelemetryRecord(1,0,0, hit ? "get-document" : "get-missing");
   return hit ? hit.document : null;
 }
+// 削除は _updatedAt の差分では検知できないため、対象コレクションの削除を行うwriteには
+// 自動で「tombstones_<コレクション名>」への記録を1件追加する。呼び出し側（delete()やbatch.delete()）
+// を変更する必要はなく、caesarCommitを通る削除は全て自動的にここを通る。
+function caesarAugmentWritesWithTombstones(writes){
+  const extra = [];
+  (writes || []).forEach((w) => {
+    if(!w.delete) return;
+    const seg = caesarRestSegmentsFromDocName(w.delete);
+    if(seg.length !== 2) return;
+    const [collectionName, docId] = seg;
+    if(!CAESAR_SYNC_CACHE_COLLECTIONS.includes(collectionName)) return;
+    extra.push(caesarSetWrite(["tombstones_" + collectionName, docId], { deletedAt: new Date().toISOString() }, false));
+  });
+  return extra.length ? [...writes, ...extra] : writes;
+}
 async function caesarCommit(writes, opts){
   const bulk = !!(opts && opts.bulk);
-  abuseGuardCheck(0,Array.isArray(writes)?writes.length:0,"caesar-commit",bulk);
-  if(!writes.length) return {};
+  const augmented = caesarAugmentWritesWithTombstones(writes);
+  abuseGuardCheck(0,Array.isArray(augmented)?augmented.length:0,"caesar-commit",bulk);
+  if(!augmented.length) return {};
   const quotaWait = caesarRestQuotaDelayRemaining();
   if(quotaWait > 0){
     const e = new Error(`Firestore quota cooldown active (${Math.ceil(quotaWait/1000)}s)`);
@@ -1665,7 +1730,7 @@ async function caesarCommit(writes, opts){
   }
   const headers = await caesarRestHeaders();
   const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/(default)/documents:commit`;
-  const res = await fetch(url, {method:"POST", headers, body:JSON.stringify({writes}), cache:"no-store"});
+  const res = await fetch(url, {method:"POST", headers, body:JSON.stringify({writes:augmented}), cache:"no-store"});
   const raw = await res.text();
   if(!res.ok){
     const err = new Error(`REST COMMIT HTTP ${res.status}: ${raw.slice(0,500)}`);
@@ -1675,14 +1740,20 @@ async function caesarCommit(writes, opts){
   }
   caesarRestClearQuotaCooldown();
   const result = raw ? JSON.parse(raw) : {};
-  sentinelTelemetryRecordCommit(writes,"commit");
+  sentinelTelemetryRecordCommit(augmented,"commit");
   // Firestoreへ書き込めた内容は、ネットワーク再読込せずローカル購読キャッシュへ反映する。
   // これにより「自分の操作」は即時表示しつつ、全件再取得のread消費を発生させない。
   caesarRestApplyCommittedWrites(writes);
   return result;
 }
 function caesarSetWrite(segments, data, merge){
-  const normalized = caesarNormalizeDottedData(data || {});
+  // 差分同期のため、対象コレクションの直下ドキュメント（バックアップ内コピー等は除く）には
+  // 自動で更新時刻を付与する。これにより「前回同期以降に変わったものだけ」を問い合わせられる。
+  let payload = data || {};
+  if(segments.length === 2 && CAESAR_SYNC_CACHE_COLLECTIONS.includes(segments[0])){
+    payload = {...payload, _updatedAt:new Date().toISOString()};
+  }
+  const normalized = caesarNormalizeDottedData(payload);
   const write = {
     update: {
       name: caesarDocName(segments),
@@ -1690,7 +1761,7 @@ function caesarSetWrite(segments, data, merge){
     }
   };
   if(merge){
-    write.updateMask = {fieldPaths:Object.keys(data || {})};
+    write.updateMask = {fieldPaths:Object.keys(payload)};
   }
   return write;
 }
@@ -1720,6 +1791,13 @@ async function caesarRunQuery(collectionRef, queryState){
     }));
   }
   if(queryState && queryState.limit != null) structuredQuery.limit = queryState.limit;
+  if(queryState && queryState.filters && queryState.filters.length){
+    const opMap = {">":"GREATER_THAN", ">=":"GREATER_THAN_OR_EQUAL", "<":"LESS_THAN", "<=":"LESS_THAN_OR_EQUAL", "==":"EQUAL"};
+    const fieldFilters = queryState.filters.map(f => ({
+      fieldFilter: { field:{fieldPath:f.field}, op: opMap[f.op] || "EQUAL", value: caesarEncodeValue(f.value) }
+    }));
+    structuredQuery.where = fieldFilters.length === 1 ? fieldFilters[0] : { compositeFilter:{ op:"AND", filters: fieldFilters } };
+  }
 
   const base = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/(default)/documents`;
   const url = parentSegments.length
@@ -1844,8 +1922,22 @@ async function caesarRestLoadQuerySub(sub, isInitial){
     throw e;
   }
   try{
-    const snap = await caesarRunQuery(sub.collectionRef, sub.state);
-    sub.records = new Map(snap.docs.map(d => [d.id, caesarRestDeepClone(d.data())]));
+    const name = sub.collectionRef._segments.length === 1 ? sub.collectionRef._segments[0] : null;
+    // 手元に既にレコードがある場合だけ、差分同期（編集は_updatedAt、削除はtombstoneで検知）を試みる。
+    // 空のsub（このブラウザでまだ一度も取れていない）は差分にできないので通常どおり全件取得する。
+    const deltaResult = (name && sub.records && sub.records.size > 0) ? await caesarRunDeltaSync(name, sub.records) : null;
+    let snap = null;
+    if(!deltaResult){
+      snap = await caesarRunQuery(sub.collectionRef, sub.state);
+      sub.records = new Map(snap.docs.map(d => [d.id, caesarRestDeepClone(d.data())]));
+      if(name) caesarSyncMetaMarkFull(name);
+    }
+    if(name && CAESAR_SYNC_CACHE_COLLECTIONS.includes(name)){
+      // 差分・全件どちらの場合も、取得のたびに永続キャッシュを最新のsub.recordsで上書きしておく。
+      // これを怠ると、次回起動時の差分同期が「実は既にこのセッションで取得済みのドキュメント」を
+      // 取りこぼしたままカーソルだけ進んでしまう。
+      caesarCacheSaveJSON(caesarSyncCacheKey(name), Array.from(sub.records.entries()).map(([id, data]) => ({ id, ...data })));
+    }
     sub.failure = 0;
     caesarRestPollFailureCount = 0;
     caesarRestClearQuotaCooldown();
@@ -1936,6 +2028,7 @@ async function caesarRestRefreshAll(skipNames){
 }
 
 function caesarRestApplyCommittedWrites(writes){
+  const touchedCollections = new Set();
   for(const w of (writes || [])){
     const name = w.update ? w.update.name : w.delete;
     const seg = caesarRestSegmentsFromDocName(name);
@@ -1956,6 +2049,7 @@ function caesarRestApplyCommittedWrites(writes){
         sub.records.set(docId, isMerge ? caesarRestDeepMerge(prev, patch) : caesarRestDeepClone(patch));
       }
       caesarRestEmitQuerySub(sub);
+      touchedCollections.add(collectionKey);
     });
 
     caesarRestDocSubscriptions.forEach(sub=>{
@@ -1965,15 +2059,26 @@ function caesarRestApplyCommittedWrites(writes){
       caesarRestEmitDocSub(sub);
     });
   }
+  // 自分自身の追加/編集/削除も、その場で永続キャッシュへ書き戻す。
+  // これをしないと、例えば自分で削除した直後にタブを閉じた場合、次回起動時の
+  // 差分取得では削除は検知できないため、消したはずの項目が一時的に復活して見えてしまう。
+  touchedCollections.forEach(collectionKey=>{
+    if(!CAESAR_SYNC_CACHE_COLLECTIONS.includes(collectionKey)) return;
+    caesarRestQuerySubscriptions.forEach(sub=>{
+      if(sub.stopped || sub.collectionRef._segments.join("/") !== collectionKey) return;
+      caesarCacheSaveJSON(caesarSyncCacheKey(collectionKey), Array.from(sub.records.entries()).map(([id, data]) => ({ id, ...data })));
+    });
+  });
 }
 
-function caesarStartQuerySub(collectionRef, state, onNext, onError, seedRecords){
+function caesarStartQuerySub(collectionRef, state, onNext, onError, seedRecords, skipFetch){
   const sub = {collectionRef, state, onNext, onError, records: seedRecords ? new Map(seedRecords) : new Map(), stopped:false, failure:0, retryTimer:null};
   caesarRestQuerySubscriptions.add(sub);
-  if(seedRecords){
-    // キャッシュ済みデータがある場合はネットワーク取得を省略し、即座にそれを反映する
+  if(seedRecords && skipFetch){
+    // 版が一致しているキャッシュ：ネットワーク取得を完全に省略し、即座にそれを反映する
     caesarRestEmitQuerySub(sub);
   }else{
+    // seedRecordsがある場合（版が古いだけのキャッシュ）は、これを土台に差分取得を試みる
     caesarRestLoadQuerySub(sub, true).catch(()=>{});
   }
   return () => {
@@ -1994,9 +2099,11 @@ function caesarQueryRef(collectionRef, state){
     },
     limit(n){ return caesarQueryRef(collectionRef, {...base, limit:n}); },
     async get(){ return caesarRunQuery(collectionRef, base); },
-    onSnapshot(onNext, onError){ return caesarStartQuerySub(collectionRef, base, onNext, onError, null); },
-    // records: Map<id,data> のキャッシュを渡すと、初回のFirestore GET(read)を省略できる
-    onSnapshotSeeded(records, onNext, onError){ return caesarStartQuerySub(collectionRef, base, onNext, onError, records); }
+    onSnapshot(onNext, onError){ return caesarStartQuerySub(collectionRef, base, onNext, onError, null, false); },
+    // records: Map<id,data> のキャッシュを渡すと、初回のFirestore GET(read)を省略できる（版が一致している場合用）
+    onSnapshotSeeded(records, onNext, onError){ return caesarStartQuerySub(collectionRef, base, onNext, onError, records, true); },
+    // records: 版が古い可能性があるキャッシュを渡す。取得はするが、差分（_updatedAt基準）で済ませる
+    onSnapshotStale(records, onNext, onError){ return caesarStartQuerySub(collectionRef, base, onNext, onError, records, false); }
   };
 }
 
@@ -2034,7 +2141,8 @@ function caesarCollectionRef(segments, topLevel){
     orderBy(field, dir){ return caesarQueryRef(ref, {orders:[{field:String(field), dir:dir || "asc"}], limit:null}); },
     limit(n){ return caesarQueryRef(ref, {orders:[], limit:n}); },
     onSnapshot(onNext, onError){ return caesarQueryRef(ref, {orders:[], limit:null}).onSnapshot(onNext, onError); },
-    onSnapshotSeeded(records, onNext, onError){ return caesarQueryRef(ref, {orders:[], limit:null}).onSnapshotSeeded(records, onNext, onError); }
+    onSnapshotSeeded(records, onNext, onError){ return caesarQueryRef(ref, {orders:[], limit:null}).onSnapshotSeeded(records, onNext, onError); },
+    onSnapshotStale(records, onNext, onError){ return caesarQueryRef(ref, {orders:[], limit:null}).onSnapshotStale(records, onNext, onError); }
   };
   return ref;
 }
@@ -2286,14 +2394,40 @@ async function rotateOldBackups() {
 // それ（メモリ上のデータ）をそのまま使い、追加readなしで済ませる。
 // まだ一度も開いておらず購読が無い場合だけ、バックアップのためにその場で1回だけ取得する
 // （自動バックアップは1日1回程度しか実行されないため、発生してもごく小さいコスト）。
+// 対象コレクションを「ローカルキャッシュ＋差分」で取得する共通ヘルパー。
+// ローカルキャッシュが無い、または前回フル同期から24時間以上経っている場合のみ全件取得し、
+// それ以外は _updatedAt を使った差分クエリで済ませる（バックアップのために毎回全件読むのを避ける）。
+async function caesarFetchCollectionWithDelta(name) {
+  const collectionRef = db.collection(name);
+  const localRecords = caesarCacheLoadJSON(caesarSyncCacheKey(name), null);
+  if (!Array.isArray(localRecords)) {
+    const snap = await withDbTimeout(collectionRef.get(), `${name}-fallback-full-get-timeout`);
+    const records = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    caesarSyncMetaMarkFull(name);
+    caesarCacheSaveJSON(caesarSyncCacheKey(name), records);
+    return records;
+  }
+  const localMap = new Map(localRecords.map((r) => [r.id, r]));
+  const deltaResult = await withDbTimeout(caesarRunDeltaSync(name, localMap), `${name}-fallback-delta-get-timeout`);
+  if (!deltaResult) {
+    const snap = await withDbTimeout(collectionRef.get(), `${name}-fallback-full-get-timeout`);
+    const records = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    caesarSyncMetaMarkFull(name);
+    caesarCacheSaveJSON(caesarSyncCacheKey(name), records);
+    return records;
+  }
+  const records = Array.from(localMap.entries()).map(([id, data]) => ({ id, ...data }));
+  caesarCacheSaveJSON(caesarSyncCacheKey(name), records);
+  return records;
+}
+
 async function getWasteEntriesForBackup() {
   const cached = caesarGetCachedRecordsForCollection("wasteEntries");
   if (cached) return cached;
-  const snap = await withDbTimeout(db.collection("wasteEntries").get(), "backup-wasteEntries-fallback-get-timeout");
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  return caesarFetchCollectionWithDelta("wasteEntries");
 }
 
-// 前回の自動バックアップから一定時間（1時間）経っていれば新しくバックアップを作る。
+// 前回の自動バックアップから一定時間（24時間）経っていれば新しくバックアップを作る。
 // アプリ起動時に加えて、開きっぱなしのセッション中も定期的に呼び出される。
 // data: createBackupSnapshotへそのまま渡す、呼び出し元がすでに読み込み済みのデータ一式。
 async function autoBackupIfNeeded(data) {
@@ -5554,9 +5688,14 @@ const toggleTheme = () => {
             setLoading(false);
             if (!chemFirstLoadDone) { chemFirstLoadDone = true; startupCollected.chemicals = []; maybeTriggerStartupBackup(); }
           };
-          unsubChem = syncCheck.unchanged.has("chemicals")
-            ? db.collection("chemicals").onSnapshotSeeded(new Map(caesarCacheLoadJSON(caesarSyncCacheKey("chemicals"), []).map((r) => [r.id, r])), onChemNext, onChemError)
-            : db.collection("chemicals").onSnapshot(onChemNext, onChemError);
+          {
+            const chemCache = caesarCacheLoadJSON(caesarSyncCacheKey("chemicals"), null);
+            unsubChem = syncCheck.unchanged.has("chemicals")
+              ? db.collection("chemicals").onSnapshotSeeded(new Map((chemCache || []).map((r) => [r.id, r])), onChemNext, onChemError)
+              : Array.isArray(chemCache)
+                ? db.collection("chemicals").onSnapshotStale(new Map(chemCache.map((r) => [r.id, r])), onChemNext, onChemError)
+                : db.collection("chemicals").onSnapshot(onChemNext, onChemError);
+          }
 
           let wasteFirstLoadDone = false;
           const onWasteNext = (snap) => {
@@ -5574,9 +5713,14 @@ const toggleTheme = () => {
             if(!caesarRestIsQuotaError(err)) setFatalError("廃液分類データの取得に失敗しました：" + err.message);
             if (!wasteFirstLoadDone) { wasteFirstLoadDone = true; startupCollected.wasteCategories = []; maybeTriggerStartupBackup(); }
           };
-          unsubWaste = syncCheck.unchanged.has("wasteCategories")
-            ? db.collection("wasteCategories").onSnapshotSeeded(new Map(caesarCacheLoadJSON(caesarSyncCacheKey("wasteCategories"), []).map((r) => [r.id, r])), onWasteNext, onWasteError)
-            : db.collection("wasteCategories").onSnapshot(onWasteNext, onWasteError);
+          {
+            const wasteCache = caesarCacheLoadJSON(caesarSyncCacheKey("wasteCategories"), null);
+            unsubWaste = syncCheck.unchanged.has("wasteCategories")
+              ? db.collection("wasteCategories").onSnapshotSeeded(new Map((wasteCache || []).map((r) => [r.id, r])), onWasteNext, onWasteError)
+              : Array.isArray(wasteCache)
+                ? db.collection("wasteCategories").onSnapshotStale(new Map(wasteCache.map((r) => [r.id, r])), onWasteNext, onWasteError)
+                : db.collection("wasteCategories").onSnapshot(onWasteNext, onWasteError);
+          }
 
           // wasteEntries（投入記録）は起動時には読み込まない。件数が積み上がっていく
           // 一番reads的に重くなりうるコレクションなので、廃液タブ等を実際に開いた
@@ -5612,9 +5756,14 @@ const toggleTheme = () => {
             console.error("locations subscription error", err);
             if (!locationsFirstLoadDone) { locationsFirstLoadDone = true; startupCollected.locations = []; maybeTriggerStartupBackup(); }
           };
-          unsubLocations = syncCheck.unchanged.has("locations")
-            ? db.collection("locations").onSnapshotSeeded(new Map(caesarCacheLoadJSON(caesarSyncCacheKey("locations"), []).map((r) => [r.id, r])), onLocationsNext, onLocationsError)
-            : db.collection("locations").onSnapshot(onLocationsNext, onLocationsError);
+          {
+            const locCache = caesarCacheLoadJSON(caesarSyncCacheKey("locations"), null);
+            unsubLocations = syncCheck.unchanged.has("locations")
+              ? db.collection("locations").onSnapshotSeeded(new Map((locCache || []).map((r) => [r.id, r])), onLocationsNext, onLocationsError)
+              : Array.isArray(locCache)
+                ? db.collection("locations").onSnapshotStale(new Map(locCache.map((r) => [r.id, r])), onLocationsNext, onLocationsError)
+                : db.collection("locations").onSnapshot(onLocationsNext, onLocationsError);
+          }
         })
         .catch((err) => {
           clearStartupTimeout();
@@ -5688,9 +5837,14 @@ const toggleTheme = () => {
       console.error("wasteEntries subscription error", err);
       if (!caesarRestIsQuotaError(err)) setFatalError("廃液記録データの取得に失敗しました：" + err.message);
     };
-    wasteEntriesSubRef.current.unsub = syncCheck.unchanged.has("wasteEntries")
-      ? db.collection("wasteEntries").onSnapshotSeeded(new Map(caesarCacheLoadJSON(caesarSyncCacheKey("wasteEntries"), []).map((r) => [r.id, r])), onNext, onError)
-      : db.collection("wasteEntries").onSnapshot(onNext, onError);
+    {
+      const weCache = caesarCacheLoadJSON(caesarSyncCacheKey("wasteEntries"), null);
+      wasteEntriesSubRef.current.unsub = syncCheck.unchanged.has("wasteEntries")
+        ? db.collection("wasteEntries").onSnapshotSeeded(new Map((weCache || []).map((r) => [r.id, r])), onNext, onError)
+        : Array.isArray(weCache)
+          ? db.collection("wasteEntries").onSnapshotStale(new Map(weCache.map((r) => [r.id, r])), onNext, onError)
+          : db.collection("wasteEntries").onSnapshot(onNext, onError);
+    }
   }, [homeTab, current.view]);
 
   useEffect(() => {
