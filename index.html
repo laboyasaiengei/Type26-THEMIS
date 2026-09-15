@@ -134,7 +134,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='1.6.5';
+const CAESAR_APP_VERSION='1.6.6';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -2262,6 +2262,32 @@ async function fixEvansBlueFullStatusIfNeeded() {
     await withDbTimeout(ref.update({ "stock.status": "full" }), "evansBlue-update-timeout");
     await bumpSyncVersion(["chemicals"]).catch((e) => console.warn("evansBlue補正後のsyncVersion更新に失敗:", e));
   }
+}
+
+// seedIfNeeded / syncExcelInventoryIfNeeded / fixEvansBlueFullStatusIfNeeded は、
+// 個別に呼ぶと起動のたびに meta/status・meta/excelInventoryImport・chemicals/xl_0127 の
+// 3件を毎回readしてしまう（本番環境ではどれもとっくに完了済みで、実質「何もしない」を
+// 確認するためだけのread）。ここで meta/migrations 1件のreadに集約し、
+// 全て完了済みと分かっている場合は個別チェックそのものを丸ごと省略する。
+// 未完了の項目がある場合だけ、その項目の元の関数を呼ぶ（読み込み件数は従来どおり）。
+async function caesarRunOneTimeMigrationsIfNeeded() {
+  const migRef = db.collection("meta").doc("migrations");
+  const migSnap = await withDbTimeout(migRef.get(), "migrations-get-timeout");
+  const mig = migSnap.exists ? migSnap.data() : {};
+
+  const seededDone = !!mig.seeded;
+  const excelDone = mig.excelImportVersion === EXCEL_IMPORT_VERSION;
+  const evansBlueDone = !!mig.evansBlueFixed;
+  if (seededDone && excelDone && evansBlueDone) return; // 追加readなしで終了
+
+  const patch = {};
+  if (!seededDone) { await seedIfNeeded(); patch.seeded = true; }
+  if (!excelDone) { await syncExcelInventoryIfNeeded(); patch.excelImportVersion = EXCEL_IMPORT_VERSION; }
+  if (!evansBlueDone) { await fixEvansBlueFullStatusIfNeeded(); patch.evansBlueFixed = true; }
+
+  await withDbTimeout(migRef.set(patch, { merge: true }), "migrations-set-timeout").catch((e) =>
+    console.warn("移行完了フラグの保存に失敗（次回起動時も個別チェックが走ります）:", e)
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -5662,9 +5688,7 @@ const toggleTheme = () => {
           // 起動のたびにこれらを直列に待つと、途中のFirestore通信が1回でも
           // 詰まった場合にアプリ全体が起動不能になってしまうため、
           // 本体の初回データ取得はブロックさせず、裏で試すだけにする。
-          seedIfNeeded()
-            .then(() => syncExcelInventoryIfNeeded())
-            .then(() => fixEvansBlueFullStatusIfNeeded())
+          caesarRunOneTimeMigrationsIfNeeded()
             .catch((err) => console.warn("起動時の初期化/移行チェックに失敗（本体表示には影響なし）:", err));
 
           let chemFirstLoadDone = false;
