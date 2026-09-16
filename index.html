@@ -134,7 +134,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='1.6.6';
+const CAESAR_APP_VERSION='1.6.7';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -2459,10 +2459,31 @@ async function getWasteEntriesForBackup() {
 async function autoBackupIfNeeded(data) {
   const stateRef = db.collection("meta").doc("backupState");
   const stateSnap = await withDbTimeout(stateRef.get(), "autoBackupState-get-timeout");
-  const last = stateSnap.exists ? stateSnap.data().lastAutoBackupAt : null;
+  const state = stateSnap.exists ? stateSnap.data() : {};
+  const last = state.lastAutoBackupAt;
   if (last && Date.now() - new Date(last).getTime() < AUTO_BACKUP_INTERVAL_MS) return;
+
+  // 前回バックアップ以降、実データに一切変更が無ければ（誰も編集していない日など）、
+  // 全コレクションを丸ごと複製する重いwriteを省略する。meta/syncVersionを1件だけ
+  // 読み直して判定する（このreadは、無駄な複製writeが数百件発生するのを防ぐには十分安い）。
+  let currentVersions = null;
+  try {
+    const verSnap = await withDbTimeout(db.collection("meta").doc("syncVersion").get(), "autoBackupState-syncVersion-get-timeout");
+    currentVersions = verSnap.exists ? verSnap.data() : {};
+  } catch (e) {
+    console.warn("自動バックアップ用のsyncVersion確認に失敗（安全のため通常どおりバックアップします）:", e);
+  }
+  if (currentVersions) {
+    const lastVersions = state.lastBackedUpVersions || {};
+    const unchanged = last && CAESAR_SYNC_CACHE_COLLECTIONS.every((name) => (lastVersions[name] ?? null) === (currentVersions[name] ?? null));
+    if (unchanged) return; // 変更なし：lastAutoBackupAtも更新しない（次回チェック時に再判定するだけで、追加writeは発生しない）
+  }
+
   await createBackupSnapshot("auto", data);
-  await withDbTimeout(stateRef.set({ lastAutoBackupAt: new Date().toISOString() }, { merge: true }), "autoBackupState-set-timeout");
+  await withDbTimeout(
+    stateRef.set({ lastAutoBackupAt: new Date().toISOString(), lastBackedUpVersions: currentVersions || {} }, { merge: true }),
+    "autoBackupState-set-timeout"
+  );
   await rotateOldBackups();
 }
 
