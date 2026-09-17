@@ -917,6 +917,15 @@ function caesarRestIsQuotaError(e){
     /HTTP 429|RESOURCE_EXHAUSTED|Quota exceeded/i.test(String(e.message || ""))
   ));
 }
+// caesarSetWriteのprecondition(currentDocument)が満たせず書き込みが拒否された場合に true。
+// 「他のクライアントが同時に同じドキュメントを先に書き換えた／作成した」ことを示すだけの、
+// 想定内の競合なので、呼び出し側はエラー扱いせず静かに諦めてよい。
+function caesarRestIsPreconditionFailed(e){
+  return !!(e && (
+    e.httpStatus === 400 &&
+    /FAILED_PRECONDITION/i.test(String(e.message || ""))
+  ));
+}
 function caesarRestEnterQuotaCooldown(){
   // 同時に複数リクエストが429になっても、1回の事故で段階を何段も進めない。
   const remaining = Math.max(0, caesarRestQuotaCooldownUntil - Date.now());
@@ -1746,7 +1755,7 @@ async function caesarCommit(writes, opts){
   caesarRestApplyCommittedWrites(writes);
   return result;
 }
-function caesarSetWrite(segments, data, merge){
+function caesarSetWrite(segments, data, merge, precondition){
   // 差分同期のため、対象コレクションの直下ドキュメント（バックアップ内コピー等は除く）には
   // 自動で更新時刻を付与する。これにより「前回同期以降に変わったものだけ」を問い合わせられる。
   let payload = data || {};
@@ -1763,6 +1772,12 @@ function caesarSetWrite(segments, data, merge){
   if(merge){
     write.updateMask = {fieldPaths:Object.keys(payload)};
   }
+  // precondition: {updateTime} または {exists:false} を渡すと、Firestore側で
+  // 「読んだ時点から変わっていない（／まだ存在しない）場合だけ書き込む」楽観ロックになる。
+  // 条件を満たさない場合、コミット全体がFAILED_PRECONDITIONで失敗する。
+  if(precondition){
+    write.currentDocument = precondition;
+  }
   return write;
 }
 function caesarDeleteWrite(segments){
@@ -1775,6 +1790,10 @@ function caesarDocSnapshot(ref, doc){
     id: ref.id,
     ref,
     exists,
+    // 楽観ロック用：このスナップショットを読んだ時点のFirestore側の更新時刻。
+    // 「読んだ内容が古くなっていないか」を書き込み時にcurrentDocument preconditionで
+    // 確認したい場合に使う（例：複数端末が同時に自動バックアップを担当しようとするのを防ぐ）。
+    updateTime: exists ? (doc.updateTime || null) : null,
     data(){ return exists ? caesarDecodeDocument(doc) : undefined; }
   };
 }
@@ -2483,15 +2502,46 @@ async function autoBackupIfNeeded(getData) {
     if (unchanged) return; // 変更なし：lastAutoBackupAtも更新しない（次回チェック時に再判定するだけで、追加writeは発生しない）
   }
 
-  // ここまで来て初めて「今回は本当にバックアップを作る」と決まるので、
-  // wasteEntriesを含むデータ一式をこのタイミングで読み込む。
-  const data = await getData();
-  await createBackupSnapshot("auto", data);
-  await withDbTimeout(
-    stateRef.set({ lastAutoBackupAt: new Date().toISOString(), lastBackedUpVersions: currentVersions || {} }, { merge: true }),
-    "autoBackupState-set-timeout"
-  );
-  await rotateOldBackups();
+  // 複数のタブ・端末が同時にここまで来ると、どちらも「まだ24時間経っていない」を
+  // 知らないまま二重にバックアップを作ってしまう（チェックしてから実際に作り終えるまでの
+  // 間に、他方も同じ古いlastAutoBackupAtを読んでしまうレースコンディション）。
+  // これを防ぐため、実際にバックアップ本体を作り始める前に「自分が今回の担当になった」と
+  // 先にFirestoreへ宣言する。宣言の書き込みには、直前に読んだ内容から変わっていないこと
+  // （まだ存在しない場合は「存在しない」こと）をcurrentDocument preconditionで指定するので、
+  // 他のクライアントが一瞬でも先に宣言していれば、この書き込み自体が失敗して自然に諦められる。
+  const precondition = stateSnap.exists ? { updateTime: stateSnap.updateTime } : { exists: false };
+  const claimedVersions = currentVersions || state.lastBackedUpVersions || {};
+  try {
+    await withDbTimeout(
+      caesarCommit([caesarSetWrite(["meta", "backupState"], { lastAutoBackupAt: new Date().toISOString(), lastBackedUpVersions: claimedVersions }, true, precondition)]),
+      "autoBackupState-claim-timeout"
+    );
+  } catch (e) {
+    if (caesarRestIsPreconditionFailed(e)) return; // 他のクライアントが同時に先へ進んでいた：今回は何もしない
+    throw e;
+  }
+
+  try {
+    // ここまで来て初めて「今回は本当にバックアップを作る」と決まるので、
+    // wasteEntriesを含むデータ一式をこのタイミングで読み込む。
+    const data = await getData();
+    await createBackupSnapshot("auto", data);
+    await rotateOldBackups();
+  } catch (e) {
+    // バックアップ本体の作成に失敗した場合、上の「担当宣言」だけが先に確定してしまうと
+    // 実際にはバックアップが無いのに1日スキップされてしまう。次に来たクライアントが
+    // 再挑戦できるよう、宣言前の状態に戻す（前回のバックアップが無かったならドキュメント自体を削除）。
+    try {
+      if (last) {
+        await withDbTimeout(stateRef.set({ lastAutoBackupAt: last, lastBackedUpVersions: state.lastBackedUpVersions || {} }), "autoBackupState-rollback-timeout");
+      } else {
+        await withDbTimeout(stateRef.delete(), "autoBackupState-rollback-delete-timeout");
+      }
+    } catch (rollbackErr) {
+      console.warn("バックアップ失敗後の担当宣言ロールバックにも失敗:", rollbackErr);
+    }
+    throw e;
+  }
 }
 
 // 指定したバックアップの内容で、現在のデータを完全に置き換える（元に戻せない操作）
@@ -3992,7 +4042,7 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
               disabled={!stockKnown}
               style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 14, fontWeight: 600, borderRadius: 10, padding: "12px", cursor: stockKnown ? "pointer" : "not-allowed", opacity: stockKnown ? 1 : 0.45, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
             >
-              <Package size={16} /> {stockKnown ? "使用量を記録する" : STATUS_META[status].sub}
+              <Package size={16} /> {stockKnown ? "残量を記録する" : STATUS_META[status].sub}
             </button>
             <button
               onClick={() => onDelete(chemical)}
@@ -5064,7 +5114,7 @@ function RecordMassPage({ chemical, onBack, onSave }) {
         <SectionLabel>記録日</SectionLabel>
         <div style={{ fontSize: 14, color: C.inkSoft, marginBottom: 18 }}>{today}</div>
 
-        <SectionLabel>使用後の重量（残っている量）</SectionLabel>
+        <SectionLabel>使用後の重量（残っている量）（必須）</SectionLabel>
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.paper, border: `1.5px solid ${C.line}`, borderRadius: 12, padding: "10px 14px", marginBottom: 6 }}>
           <input
             type="number"
@@ -5193,7 +5243,7 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
           placeholder="例：67-56-1"
         />
         <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 16 }}>
-          普段の画面には表示されず、Excelへの書き出し時にのみ使用します
+          Excelへの一覧書き出し時に使用します
         </div>
 
         <SectionLabel>保管場所（必須）</SectionLabel>
@@ -5283,7 +5333,7 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
         <textarea
           value={purpose}
           onChange={(e) => setPurpose(e.target.value)}
-          placeholder="例：DNA抽出時の洗浄用"
+          placeholder="例：NBT染色用"
           rows={2}
           style={{ ...inputStyle, marginBottom: 20, resize: "none" }}
         />
