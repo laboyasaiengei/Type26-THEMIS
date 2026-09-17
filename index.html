@@ -134,7 +134,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='1.6.7';
+const CAESAR_APP_VERSION='1.6.8';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -2455,8 +2455,12 @@ async function getWasteEntriesForBackup() {
 
 // 前回の自動バックアップから一定時間（24時間）経っていれば新しくバックアップを作る。
 // アプリ起動時に加えて、開きっぱなしのセッション中も定期的に呼び出される。
-// data: createBackupSnapshotへそのまま渡す、呼び出し元がすでに読み込み済みのデータ一式。
-async function autoBackupIfNeeded(data) {
+// getData: 実際にバックアップを作ることが確定してから呼ばれる非同期関数。
+//   createBackupSnapshotへ渡すデータ一式（{chemDocs, wasteDocs, entriesDocs, locDocs, settingsData}）を返す。
+//   wasteEntries（投入記録）は件数が積み上がる一番reads的に重いコレクションなので、
+//   「バックアップ不要と分かった場合」はここで一切読みにいかないようにするため、
+//   即値ではなく関数として受け取る。
+async function autoBackupIfNeeded(getData) {
   const stateRef = db.collection("meta").doc("backupState");
   const stateSnap = await withDbTimeout(stateRef.get(), "autoBackupState-get-timeout");
   const state = stateSnap.exists ? stateSnap.data() : {};
@@ -2479,6 +2483,9 @@ async function autoBackupIfNeeded(data) {
     if (unchanged) return; // 変更なし：lastAutoBackupAtも更新しない（次回チェック時に再判定するだけで、追加writeは発生しない）
   }
 
+  // ここまで来て初めて「今回は本当にバックアップを作る」と決まるので、
+  // wasteEntriesを含むデータ一式をこのタイミングで読み込む。
+  const data = await getData();
   await createBackupSnapshot("auto", data);
   await withDbTimeout(
     stateRef.set({ lastAutoBackupAt: new Date().toISOString(), lastBackedUpVersions: currentVersions || {} }, { merge: true }),
@@ -5653,15 +5660,15 @@ const toggleTheme = () => {
       const s = startupCollected;
       if (s.chemicals === undefined || s.wasteCategories === undefined || s.locations === undefined || s.settings === undefined) return;
       startupBackupTriggered = true;
-      getWasteEntriesForBackup()
-        .then((entriesDocs) => autoBackupIfNeeded({
-          chemDocs: s.chemicals,
-          wasteDocs: s.wasteCategories,
-          entriesDocs,
-          locDocs: s.locations,
-          settingsData: s.settings,
-        }))
-        .catch((err) => console.warn("起動後の自動バックアップチェックに失敗:", err));
+      // wasteEntriesの読み込みは、バックアップが実際に必要と分かった場合だけ
+      // autoBackupIfNeeded内部から行われる（起動のたびに無条件で読むのを避けるため）。
+      autoBackupIfNeeded(async () => ({
+        chemDocs: s.chemicals,
+        wasteDocs: s.wasteCategories,
+        entriesDocs: await getWasteEntriesForBackup(),
+        locDocs: s.locations,
+        settingsData: s.settings,
+      })).catch((err) => console.warn("起動後の自動バックアップチェックに失敗:", err));
     }
 
     // 特定OS(端末)で通信が単発で詰まり、読み込み画面から進まなくなる不具合の対策。
@@ -5837,15 +5844,15 @@ const toggleTheme = () => {
   // ここでも、購読中のデータをそのまま使うだけで新たな全件readは発生させない。
   useEffect(() => {
     const timer = setInterval(() => {
-      getWasteEntriesForBackup()
-        .then((entriesDocs) => autoBackupIfNeeded({
-          chemDocs: caesarGetCachedRecordsForCollection("chemicals") || [],
-          wasteDocs: caesarGetCachedRecordsForCollection("wasteCategories") || [],
-          entriesDocs,
-          locDocs: caesarGetCachedRecordsForCollection("locations") || [],
-          settingsData: caesarGetCachedDocData("meta/settings") || {},
-        }))
-        .catch((err) => console.warn("定期バックアップチェックに失敗:", err));
+      // ここも同様に、wasteEntriesの読み込みはバックアップが実際に必要と
+      // 分かった場合だけautoBackupIfNeeded内部から行われる。
+      autoBackupIfNeeded(async () => ({
+        chemDocs: caesarGetCachedRecordsForCollection("chemicals") || [],
+        wasteDocs: caesarGetCachedRecordsForCollection("wasteCategories") || [],
+        entriesDocs: await getWasteEntriesForBackup(),
+        locDocs: caesarGetCachedRecordsForCollection("locations") || [],
+        settingsData: caesarGetCachedDocData("meta/settings") || {},
+      })).catch((err) => console.warn("定期バックアップチェックに失敗:", err));
     }, AUTO_BACKUP_INTERVAL_MS);
     return () => clearInterval(timer);
   }, []);
