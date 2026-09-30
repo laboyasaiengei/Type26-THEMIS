@@ -4385,7 +4385,7 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
           <span style={{ fontWeight: 700 }}>*</span> は必須項目です
         </div>
 
-        <SectionLabel>薬品名</SectionLabel>
+        <SectionLabel>薬品名<span style={{ color: C.danger }}>*</span></SectionLabel>
         <input style={{ ...inputStyle, marginBottom: 20 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="例：メタノール" />
 
         <SectionLabel>分子式（任意）</SectionLabel>
@@ -5407,7 +5407,7 @@ function RecordMassPage({ chemical, onBack, onSave }) {
           placeholder="氏名"
         />
 
-        <SectionLabel>使用後の重量（残量）</SectionLabel>
+        <SectionLabel>使用後の重量 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.paper, border: `1.5px solid ${C.line}`, borderRadius: 12, padding: "10px 14px", marginBottom: 6 }}>
           <input
             type="number"
