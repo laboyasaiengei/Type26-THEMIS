@@ -134,7 +134,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='1.6.8';
+const CAESAR_APP_VERSION='2.0';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -143,7 +143,47 @@ function allowed(){const now=Date.now(),a=load(RK,[]).filter(t=>now-t<600000);if
 function put(category,location,status,detail){const now=Date.now(),key=[category,location,status||0].join("|");if(now-(recent.get(key)||0)<60000||!allowed())return;recent.set(key,now);const q=load(QK,[]);q.push({time:new Date(now).toISOString(),appId:APP,appVersion:VER,online:navigator.onLine!==false,category:clean(category,60),location:clean(location,80),detail:clean(detail,160),httpStatus:Number(status)||0});save(QK,q.slice(-50));setTimeout(flush,0)}
 function loc(u){u=String(u||"");if(u.includes("firestore.googleapis.com"))return "Firestore REST";if(u.includes("securetoken.googleapis.com"))return "Firebase Token";if(u.includes("identitytoolkit.googleapis.com"))return "Firebase Auth";if(u.includes("firebaseappcheck.googleapis.com")||u.includes("recaptchaenterprise.googleapis.com"))return "App Check";return "Firebase/Google API"}
 function watch(u){u=String(u||"");return /(?:firestore|securetoken|identitytoolkit|firebaseappcheck|recaptchaenterprise)\.googleapis\.com/.test(u)&&!u.includes("sentinelDiagnostics")}
-window.fetch=async function(input,init){const u=typeof input==="string"?input:(input&&input.url)||"";try{const r=await origFetch(input,init);if(watch(u)&&!r.ok)put("http-error",loc(u),r.status,(init&&init.method)||"GET");return r}catch(e){if(watch(u))put("network-error",loc(u),0,e&&e.name||"fetch failed");throw e}};
+/* Firestore RESTのnetwork-errorだけは特別扱いする:
+   1) 単発失敗では通報しない
+   2) 一度だけ即時再試行する
+   3) 再試行(=実際の再接続)で成功したらSENTINELには送らない
+   4) 連続失敗かつ一定時間継続した場合だけ通報する
+   5) 同一エラーの再通報は1時間に1回まで */
+const FS_LOC="Firestore REST",FS_RETRY_DELAY_MS=400,FS_MIN_CONSECUTIVE=2,FS_MIN_DURATION_MS=30000,FS_REPORT_COOLDOWN_MS=3600000;
+let fsFailCount=0,fsFirstFailAt=0,fsLastReportedAt=0;
+const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
+window.fetch=async function(input,init){
+  const u=typeof input==="string"?input:(input&&input.url)||"";
+  const isFsTarget=watch(u)&&loc(u)===FS_LOC;
+  try{
+    const r=await origFetch(input,init);
+    if(watch(u)&&!r.ok)put("http-error",loc(u),r.status,(init&&init.method)||"GET");
+    if(isFsTarget&&r.ok){fsFailCount=0;fsFirstFailAt=0} // 実通信成功=再接続確認。失敗streakをリセット
+    return r;
+  }catch(e){
+    if(!isFsTarget){
+      if(watch(u))put("network-error",loc(u),0,e&&e.name||"fetch failed");
+      throw e;
+    }
+    try{
+      await sleep(FS_RETRY_DELAY_MS);
+      const r2=await origFetch(input,init);
+      if(!r2.ok)put("http-error",FS_LOC,r2.status,(init&&init.method)||"GET");
+      fsFailCount=0;fsFirstFailAt=0; // 再試行で復帰(実際の再接続成功)→通報しない
+      return r2;
+    }catch(e2){
+      const now=Date.now();
+      if(fsFailCount===0)fsFirstFailAt=now;
+      fsFailCount++;
+      const continued=fsFailCount>=FS_MIN_CONSECUTIVE&&(now-fsFirstFailAt)>=FS_MIN_DURATION_MS;
+      if(continued&&(now-fsLastReportedAt)>=FS_REPORT_COOLDOWN_MS){
+        fsLastReportedAt=now;
+        put("network-error",FS_LOC,0,e2&&e2.name||"fetch failed");
+      }
+      throw e2; // 呼び出し元の既存のオフライン/エラー処理はそのまま動作させる
+    }
+  }
+};
 async function ready(){if(auth&&check)return;if(typeof firebase==="undefined"||!firebase.initializeApp||!firebase.auth||!firebase.appCheck)throw Error("diagnostic sdk unavailable");try{app=firebase.app("sentinel-diagnostic-prod")}catch(_){app=firebase.initializeApp(CFG,"sentinel-diagnostic-prod")}auth=app.auth();check=app.appCheck();try{check.activate(new firebase.appCheck.ReCaptchaEnterpriseProvider(SITE),true)}catch(_){}if(!auth.currentUser)await auth.signInAnonymously()}
 async function send(e){await ready();const u=auth.currentUser||(await auth.signInAnonymously()).user,id=await u.getIdToken(),ac=await check.getToken(false),rid=APP+"_"+Date.now().toString(36)+"_"+Math.random().toString(36).slice(2,8);const f={appId:{stringValue:e.appId},occurredAt:{timestampValue:e.time},appVersion:{stringValue:e.appVersion},online:{booleanValue:!!e.online},category:{stringValue:e.category},location:{stringValue:e.location},detail:{stringValue:e.detail}};if(e.httpStatus)f.httpStatus={integerValue:String(e.httpStatus)};const h={Authorization:"Bearer "+id,"Content-Type":"application/json"};if(ac&&ac.token)h["X-Firebase-AppCheck"]=ac.token;const r=await origFetch("https://firestore.googleapis.com/v1/projects/dev-caesar/databases/(default)/documents/sentinelDiagnostics?documentId="+encodeURIComponent(rid),{method:"POST",headers:h,body:JSON.stringify({fields:f}),cache:"no-store"});if(!r.ok)throw Error("diagnostic HTTP "+r.status)}
 async function flush(){if(busy||navigator.onLine===false)return;busy=true;try{let q=load(QK,[]);while(q.length){try{await send(q[0]);q.shift();save(QK,q)}catch(_){break}}}finally{busy=false}}
@@ -218,6 +258,9 @@ const LIGHT_TOKENS = {
   danger: "#B23B31",
   dangerDeep: "#7C2A21",
   dangerBg: "#F6E4E1",
+  warn: "#8A5A00",
+  warnBg: "#FFF4D1",
+  warnBar: "#E2A233",
   okBg: "#E6ECF3",
   lockBg: "#EDEFEA",
 };
@@ -235,6 +278,9 @@ const DARK_TOKENS = {
   danger: "#E0796B",
   dangerDeep: "#5C2A22",
   dangerBg: "#3A211D",
+  warn: "#F2C94C",
+  warnBg: "#3A311A",
+  warnBar: "#EFC169",
   okBg: "#1C2A3A",
   lockBg: "#20262A",
 };
@@ -291,6 +337,57 @@ function toastFail(action, e){
   console.error(action, e);
   showToast(`${action}に失敗しました（${errDetail(e)}）`, true);
 }
+
+/* ---- 起動中バージョンが古くなった時の再読み込みバナー（React外のDOMに直接描画） ----
+   仕組み: 自分自身のHTML（起動時に読み込んだのと同じURL）を定期的にキャッシュ無視で取得し、
+   その中に書かれている CAESAR_APP_VERSION と、今動いているタブが持つ CAESAR_APP_VERSION を
+   比較する。違っていれば「新しいバージョンが公開済み」とみなしてバナーを出す。
+   通信状況やオフライン時は静かに諦める（ユーザーへのエラー通知はしない）。 */
+let caesarVersionBannerShown = false;
+function showVersionUpdateBanner(){
+  if (caesarVersionBannerShown) return;
+  caesarVersionBannerShown = true;
+  const bar = document.createElement("div");
+  bar.id = "caesarVersionBanner";
+  bar.style.cssText = [
+    "position:fixed", "left:0", "right:0", "top:0", "z-index:100000",
+    "background:" + (HEADER.bg || "#122A4E"), "color:#fff",
+    "font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",
+    "font-size:13px", "font-weight:600", "padding:10px 14px",
+    "display:flex", "align-items:center", "justify-content:center", "gap:12px",
+    "flex-wrap:wrap", "box-shadow:0 2px 10px rgba(0,0,0,.25)",
+    "transform:translateY(-100%)", "transition:transform .25s ease",
+  ].join(";");
+  bar.innerHTML =
+    '<span>新しいバージョンが公開されています。再読み込みすると最新の状態になります。</span>' +
+    '<button id="caesarVersionBannerBtn" style="' +
+    ["background:#fff", "color:" + (HEADER.bg || "#122A4E"), "border:none", "border-radius:8px",
+      "padding:6px 14px", "font-weight:700", "font-size:12.5px", "cursor:pointer"].join(";") +
+    '">今すぐ再読み込み</button>';
+  document.body.appendChild(bar);
+  document.getElementById("caesarVersionBannerBtn").onclick = () => window.location.reload();
+  requestAnimationFrame(() => { bar.style.transform = "translateY(0)"; });
+}
+async function caesarCheckForNewVersion(){
+  try{
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+    const r = await origFetch(window.location.href, { cache: "no-store" });
+    if (!r.ok) return;
+    const html = await r.text();
+    const m = html.match(/CAESAR_APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
+    if (m && m[1] && m[1] !== CAESAR_APP_VERSION) showVersionUpdateBanner();
+  }catch(_e){
+    // 取得できなくても静かに諦める（オフライン等でユーザーを煩わせない）
+  }
+}
+(function caesarStartVersionWatch(){
+  const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15分ごと
+  setTimeout(caesarCheckForNewVersion, 10000); // 起動直後は落ち着いてから最初の1回
+  setInterval(caesarCheckForNewVersion, CHECK_INTERVAL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") caesarCheckForNewVersion();
+  });
+})();
 
 // どの分類も処分の考え方は共通（タンク単位のルール）
 const DISPOSAL_POLICY = "タンク使用開始日から1年経過か、満杯時に廃棄";
@@ -915,15 +1012,6 @@ function caesarRestIsQuotaError(e){
   return !!(e && (
     e.httpStatus === 429 ||
     /HTTP 429|RESOURCE_EXHAUSTED|Quota exceeded/i.test(String(e.message || ""))
-  ));
-}
-// caesarSetWriteのprecondition(currentDocument)が満たせず書き込みが拒否された場合に true。
-// 「他のクライアントが同時に同じドキュメントを先に書き換えた／作成した」ことを示すだけの、
-// 想定内の競合なので、呼び出し側はエラー扱いせず静かに諦めてよい。
-function caesarRestIsPreconditionFailed(e){
-  return !!(e && (
-    e.httpStatus === 400 &&
-    /FAILED_PRECONDITION/i.test(String(e.message || ""))
   ));
 }
 function caesarRestEnterQuotaCooldown(){
@@ -1755,7 +1843,7 @@ async function caesarCommit(writes, opts){
   caesarRestApplyCommittedWrites(writes);
   return result;
 }
-function caesarSetWrite(segments, data, merge, precondition){
+function caesarSetWrite(segments, data, merge){
   // 差分同期のため、対象コレクションの直下ドキュメント（バックアップ内コピー等は除く）には
   // 自動で更新時刻を付与する。これにより「前回同期以降に変わったものだけ」を問い合わせられる。
   let payload = data || {};
@@ -1772,12 +1860,6 @@ function caesarSetWrite(segments, data, merge, precondition){
   if(merge){
     write.updateMask = {fieldPaths:Object.keys(payload)};
   }
-  // precondition: {updateTime} または {exists:false} を渡すと、Firestore側で
-  // 「読んだ時点から変わっていない（／まだ存在しない）場合だけ書き込む」楽観ロックになる。
-  // 条件を満たさない場合、コミット全体がFAILED_PRECONDITIONで失敗する。
-  if(precondition){
-    write.currentDocument = precondition;
-  }
   return write;
 }
 function caesarDeleteWrite(segments){
@@ -1790,10 +1872,6 @@ function caesarDocSnapshot(ref, doc){
     id: ref.id,
     ref,
     exists,
-    // 楽観ロック用：このスナップショットを読んだ時点のFirestore側の更新時刻。
-    // 「読んだ内容が古くなっていないか」を書き込み時にcurrentDocument preconditionで
-    // 確認したい場合に使う（例：複数端末が同時に自動バックアップを担当しようとするのを防ぐ）。
-    updateTime: exists ? (doc.updateTime || null) : null,
     data(){ return exists ? caesarDecodeDocument(doc) : undefined; }
   };
 }
@@ -2110,9 +2188,13 @@ function caesarStartQuerySub(collectionRef, state, onNext, onError, seedRecords,
 function caesarQueryRef(collectionRef, state){
   const base = {
     orders:[...((state && state.orders) || [])],
+    filters:[...((state && state.filters) || [])],
     limit:state && state.limit != null ? state.limit : null
   };
   return {
+    where(field, op, value){
+      return caesarQueryRef(collectionRef, {...base, filters:[...base.filters, {field:String(field), op, value}]});
+    },
     orderBy(field, dir){
       return caesarQueryRef(collectionRef, {...base, orders:[...base.orders, {field:String(field), dir:dir || "asc"}]});
     },
@@ -2157,6 +2239,7 @@ function caesarCollectionRef(segments, topLevel){
       return caesarDocRef([...segments, docId]);
     },
     async get(){ return caesarRunQuery(ref, {orders:[], limit:null}); },
+    where(field, op, value){ return caesarQueryRef(ref, {orders:[], filters:[{field:String(field), op, value}], limit:null}); },
     orderBy(field, dir){ return caesarQueryRef(ref, {orders:[{field:String(field), dir:dir || "asc"}], limit:null}); },
     limit(n){ return caesarQueryRef(ref, {orders:[], limit:n}); },
     onSnapshot(onNext, onError){ return caesarQueryRef(ref, {orders:[], limit:null}).onSnapshot(onNext, onError); },
@@ -2472,6 +2555,47 @@ async function getWasteEntriesForBackup() {
   return caesarFetchCollectionWithDelta("wasteEntries");
 }
 
+// 使用記録のExcelエクスポート専用。usageEntriesは常時購読していないため、
+// エクスポートが実際に押された時だけその場で1回だけ取得する（通常操作では読み込みを増やさない）。
+async function getUsageEntriesForExport() {
+  const snap = await withDbTimeout(db.collection("usageEntries").get(), "export-usageEntries-fallback-get-timeout");
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+// 使用記録の本当のバックアップ。全件を毎回読み直すのではなく、
+// 前回バックアップした時点のcreatedAtカーソル（meta/backupState.usageEntriesBackupCursor）より
+// 新しい記録"だけ"をwhereで絞り込んで取得し、usageEntriesBackup（消さずに積み上げるコレクション）へ複製する。
+// 読み書きは「前回から増えた件数」だけで済み、これは定期の自動バックアップ（autoBackupIfNeeded）に
+// 組み込んで自動実行するほか、消去機能の実行直前にも呼んで「消す対象がバックアップ漏れ」にならないようにする。
+async function backupNewUsageEntries() {
+  const stateRef = db.collection("meta").doc("backupState");
+  const stateSnap = await withDbTimeout(stateRef.get(), "usageEntriesBackup-state-get-timeout");
+  const cursor = (stateSnap.exists && stateSnap.data().usageEntriesBackupCursor) || 0;
+  const snap = await withDbTimeout(
+    db.collection("usageEntries").where("createdAt", ">", cursor).orderBy("createdAt", "asc").get(),
+    "usageEntriesBackup-query-timeout"
+  );
+  if (!snap.docs.length) return 0;
+  const ops = snap.docs.map((d) => (batch) => batch.set(db.collection("usageEntriesBackup").doc(d.id), d.data()));
+  await commitOpsInChunks(ops);
+  const maxCreatedAt = snap.docs.reduce((m, d) => Math.max(m, d.data().createdAt || 0), cursor);
+  await withDbTimeout(stateRef.set({ usageEntriesBackupCursor: maxCreatedAt }, { merge: true }), "usageEntriesBackup-state-set-timeout");
+  return snap.docs.length;
+}
+
+// 使用記録の消去（管理者専用・任意の期間）。この検索用REST層はwhere絞り込みに対応していないため、
+// エクスポートと同じく「押された時だけ」usageEntriesを1回丸ごと取得し、期間はこちら側で絞り込む
+// （getUsageEntriesForExportを流用。確認画面ですでに絞り込み済みの記録一式を受け取るので、ここでの追加読み込みはゼロ）。
+// 削除の直前にbackupNewUsageEntriesを呼び、まだバックアップされていない分だけ先に複製してから消す。
+async function deleteUsageEntriesByIds(entries) {
+  if (!entries || !entries.length) return 0;
+  await backupNewUsageEntries();
+  const ops = entries.map((u) => (batch) => batch.delete(db.collection("usageEntries").doc(u.id)));
+  await commitOpsInChunks(ops);
+  bumpSyncVersion(["usageEntries"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+  return entries.length;
+}
+
 // 前回の自動バックアップから一定時間（24時間）経っていれば新しくバックアップを作る。
 // アプリ起動時に加えて、開きっぱなしのセッション中も定期的に呼び出される。
 // getData: 実際にバックアップを作ることが確定してから呼ばれる非同期関数。
@@ -2485,6 +2609,14 @@ async function autoBackupIfNeeded(getData) {
   const state = stateSnap.exists ? stateSnap.data() : {};
   const last = state.lastAutoBackupAt;
   if (last && Date.now() - new Date(last).getTime() < AUTO_BACKUP_INTERVAL_MS) return;
+
+  // 使用記録は他コレクション（chemicals等）の変更有無に関わらず増分バックアップする
+  // （chemicals等が無変更でも使用記録だけ増えているケースを、下の「変更なしスキップ」より前で拾う）
+  try {
+    await backupNewUsageEntries();
+  } catch (e) {
+    console.warn("使用記録の自動バックアップに失敗:", e);
+  }
 
   // 前回バックアップ以降、実データに一切変更が無ければ（誰も編集していない日など）、
   // 全コレクションを丸ごと複製する重いwriteを省略する。meta/syncVersionを1件だけ
@@ -2502,46 +2634,15 @@ async function autoBackupIfNeeded(getData) {
     if (unchanged) return; // 変更なし：lastAutoBackupAtも更新しない（次回チェック時に再判定するだけで、追加writeは発生しない）
   }
 
-  // 複数のタブ・端末が同時にここまで来ると、どちらも「まだ24時間経っていない」を
-  // 知らないまま二重にバックアップを作ってしまう（チェックしてから実際に作り終えるまでの
-  // 間に、他方も同じ古いlastAutoBackupAtを読んでしまうレースコンディション）。
-  // これを防ぐため、実際にバックアップ本体を作り始める前に「自分が今回の担当になった」と
-  // 先にFirestoreへ宣言する。宣言の書き込みには、直前に読んだ内容から変わっていないこと
-  // （まだ存在しない場合は「存在しない」こと）をcurrentDocument preconditionで指定するので、
-  // 他のクライアントが一瞬でも先に宣言していれば、この書き込み自体が失敗して自然に諦められる。
-  const precondition = stateSnap.exists ? { updateTime: stateSnap.updateTime } : { exists: false };
-  const claimedVersions = currentVersions || state.lastBackedUpVersions || {};
-  try {
-    await withDbTimeout(
-      caesarCommit([caesarSetWrite(["meta", "backupState"], { lastAutoBackupAt: new Date().toISOString(), lastBackedUpVersions: claimedVersions }, true, precondition)]),
-      "autoBackupState-claim-timeout"
-    );
-  } catch (e) {
-    if (caesarRestIsPreconditionFailed(e)) return; // 他のクライアントが同時に先へ進んでいた：今回は何もしない
-    throw e;
-  }
-
-  try {
-    // ここまで来て初めて「今回は本当にバックアップを作る」と決まるので、
-    // wasteEntriesを含むデータ一式をこのタイミングで読み込む。
-    const data = await getData();
-    await createBackupSnapshot("auto", data);
-    await rotateOldBackups();
-  } catch (e) {
-    // バックアップ本体の作成に失敗した場合、上の「担当宣言」だけが先に確定してしまうと
-    // 実際にはバックアップが無いのに1日スキップされてしまう。次に来たクライアントが
-    // 再挑戦できるよう、宣言前の状態に戻す（前回のバックアップが無かったならドキュメント自体を削除）。
-    try {
-      if (last) {
-        await withDbTimeout(stateRef.set({ lastAutoBackupAt: last, lastBackedUpVersions: state.lastBackedUpVersions || {} }), "autoBackupState-rollback-timeout");
-      } else {
-        await withDbTimeout(stateRef.delete(), "autoBackupState-rollback-delete-timeout");
-      }
-    } catch (rollbackErr) {
-      console.warn("バックアップ失敗後の担当宣言ロールバックにも失敗:", rollbackErr);
-    }
-    throw e;
-  }
+  // ここまで来て初めて「今回は本当にバックアップを作る」と決まるので、
+  // wasteEntriesを含むデータ一式をこのタイミングで読み込む。
+  const data = await getData();
+  await createBackupSnapshot("auto", data);
+  await withDbTimeout(
+    stateRef.set({ lastAutoBackupAt: new Date().toISOString(), lastBackedUpVersions: currentVersions || {} }, { merge: true }),
+    "autoBackupState-set-timeout"
+  );
+  await rotateOldBackups();
 }
 
 // 指定したバックアップの内容で、現在のデータを完全に置き換える（元に戻せない操作）
@@ -3664,22 +3765,39 @@ function WasteTab({ wasteCategories, onOpenWaste, onOpenCalc, onOpenArchive, onA
           const ageWarn = isTankAgeWarning(w);
           const replaceDate = tankReplaceDate(w.tankStartDate);
           const accent = wasteAccent(w.code);
+          const isUnused = !w.entries || w.entries.length === 0;
           return (
             <button
               key={w.id}
               onClick={() => onOpenWaste(w)}
-              style={{ textAlign: "left", background: C.paper, border: `1px solid ${C.line}`, borderLeft: `4px solid ${ageWarn ? C.danger : accent.deep}`, borderRadius: 12, padding: "13px 14px", overflow: "hidden", cursor: "pointer", display: "flex" }}
+              style={{
+                textAlign: "left",
+                background: isUnused ? C.lockBg : C.paper,
+                border: isUnused ? `1.5px dashed ${C.line}` : `1px solid ${C.line}`,
+                borderLeft: `4px solid ${ageWarn ? C.warnBar : isUnused ? C.line : accent.deep}`,
+                borderRadius: 12,
+                padding: "13px 14px",
+                overflow: "hidden",
+                cursor: "pointer",
+                display: "flex",
+                opacity: isUnused ? 0.8 : 1,
+              }}
             >
               <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 10 }}>
                 <div style={{ flex: 1 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                     <WasteCodeTag waste={w} />
-                    {ageWarn && <AlertTriangle size={14} color={C.danger} />}
+                    {ageWarn && <AlertTriangle size={14} color={C.warn} />}
+                    {isUnused && (
+                      <span style={{ fontSize: 10.5, fontWeight: 700, color: C.inkSoft, background: "#fff", border: `1px solid ${C.line}`, borderRadius: 6, padding: "2px 7px" }}>
+                        未使用
+                      </span>
+                    )}
                   </div>
                   <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 6 }}>
                     {w.entries.length}件の記録・合計 {mlToL(sum.totalVolumeMl)} / {TANK_CAPACITY_L} L
                   </div>
-                  <div style={{ fontSize: 11.5, marginTop: 3, fontWeight: 600, color: ageWarn ? C.danger : C.inkSoft }}>
+                  <div style={{ fontSize: 11.5, marginTop: 3, fontWeight: 600, color: ageWarn ? C.warn : C.inkSoft }}>
                     交換目安：{replaceDate || "未設定（未使用）"}
                     {ageWarn && "（交換目安が近づいています）"}
                   </div>
@@ -4002,6 +4120,31 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
   const archivedLabel = !hasWaste && chemical.wasteLabel ? chemical.wasteLabel : null;
   const safeWaste = waste || (archivedLabel ? { ...UNKNOWN_WASTE, code: archivedLabel.code, name: archivedLabel.name } : UNKNOWN_WASTE);
 
+  // 使用履歴：常時は読み込まず、ボタンが押された時だけusageEntries全件を1回取得し、
+  // この薬品のchemicalIdで絞り込む（エクスポートや消去の確認と同じ「押した時だけ読む」方式）
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [history, setHistory] = useState(null);
+
+  const handleToggleHistory = async () => {
+    if (historyOpen) { setHistoryOpen(false); return; }
+    setHistoryOpen(true);
+    if (history !== null) return;
+    setHistoryLoading(true);
+    try {
+      const all = await getUsageEntriesForExport();
+      const mine = all
+        .filter((u) => u.chemicalId === chemical.id)
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      setHistory(mine);
+    } catch (e) {
+      toastFail("使用履歴の取得", e);
+      setHistoryOpen(false);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   return (
     <div>
       <TopBar
@@ -4018,9 +4161,20 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
       />
       <HazardStripe />
       <div style={{ padding: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
           <FormulaTag formula={chemical.formula} size={16} />
           <AutoStatusBadge statusKey={status} />
+          {chemical.riskAssessment && (
+            <span
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 4,
+                fontSize: 12, fontWeight: 700, color: C.danger, background: C.dangerBg,
+                borderRadius: 20, padding: "5px 11px", whiteSpace: "nowrap",
+              }}
+            >
+              <AlertTriangle size={12} /> アセス対象
+            </span>
+          )}
         </div>
 
         <SectionLabel>在庫状況（g）</SectionLabel>
@@ -4126,10 +4280,44 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
         <button
           onClick={() => canRecordWaste && onRecordWaste(chemical, waste)}
           disabled={!canRecordWaste}
-          style={{ width: "100%", border: `1.5px solid ${C.tealDeep}`, background: C.paper, color: C.ink, fontSize: 14, fontWeight: 700, borderRadius: 12, padding: "12px", cursor: canRecordWaste ? "pointer" : "not-allowed", opacity: canRecordWaste ? 1 : 0.6, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+          style={{ width: "100%", border: `1.5px solid ${C.tealDeep}`, background: C.paper, color: C.ink, fontSize: 14, fontWeight: 700, borderRadius: 12, padding: "12px", cursor: canRecordWaste ? "pointer" : "not-allowed", opacity: canRecordWaste ? 1 : 0.6, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginBottom: 20 }}
         >
           <Plus size={16} /> {wasteDisposed ? "処分済みのため記録できません" : "この薬品の廃液を記録する"}
         </button>
+
+        <SectionLabel>使用履歴</SectionLabel>
+        <button
+          onClick={handleToggleHistory}
+          style={{ width: "100%", textAlign: "left", background: C.paper, border: `1px solid ${C.line}`, borderRadius: 14, padding: "14px 16px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12, marginBottom: historyOpen ? 10 : 0 }}
+        >
+          <div style={{ width: 38, height: 38, borderRadius: 10, background: C.okBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <Calendar size={18} color={C.tealDeep} />
+          </div>
+          <div style={{ flex: 1, fontWeight: 600, fontSize: 14.5, color: C.ink }}>
+            {historyOpen ? "使用履歴を閉じる" : "この薬品の使用履歴を見る"}
+          </div>
+          <ChevronRight size={18} color={C.inkSoft} style={{ transform: historyOpen ? "rotate(90deg)" : "none" }} />
+        </button>
+
+        {historyOpen && (
+          historyLoading ? (
+            <div style={{ textAlign: "center", fontSize: 12.5, color: C.inkSoft, padding: "14px 0" }}>読み込んでいます…</div>
+          ) : history && history.length > 0 ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {history.map((u) => (
+                <div key={u.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "11px 14px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                    <span style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 700, fontSize: 13, color: C.ink }}>{u.date}</span>
+                    <span style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 700, fontSize: 13.5, color: C.tealDeep }}>{u.amount} {u.unit || "g"}</span>
+                  </div>
+                  <div style={{ fontSize: 12.5, color: C.inkSoft, marginTop: 4 }}>{u.personName}{u.purpose ? `・${u.purpose}` : ""}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ textAlign: "center", fontSize: 12.5, color: C.inkSoft, padding: "14px 0" }}>まだ使用記録がありません</div>
+          )
+        )}
       </div>
     </div>
   );
@@ -4149,6 +4337,7 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
   const [isFull, setIsFull] = useState(chemical.stock?.known === false && chemical.stock?.status === "full");
   const [purpose, setPurpose] = useState(chemical.purpose || "");
   const [openDate, setOpenDate] = useState(chemical.openDate || "");
+  const [riskAssessment, setRiskAssessment] = useState(!!chemical.riskAssessment);
 
   // 「FULL（未開封）」から「重量を記入」に切り替えた瞬間＝開封したタイミングとみなし、
   // 開封日が未記入なら今日の日付を自動で入れる（あとから手動で修正可能）
@@ -4185,13 +4374,17 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
     const stock = isFull
       ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
       : { amount: Math.max(0, parseFloat(amount)), capacity: 0, unit: "g", known: true };
-    onSave(chemical, { name: name.trim(), formula: formula.trim(), cas: cas.trim(), locationName, subLocation: chemical.subLocation || "", wasteId, stock, purpose: purpose.trim(), openDate: openDate || "" });
+    onSave(chemical, { name: name.trim(), formula: formula.trim(), cas: cas.trim(), locationName, subLocation: chemical.subLocation || "", wasteId, stock, purpose: purpose.trim(), openDate: openDate || "", riskAssessment });
   };
 
   return (
     <div>
       <TopBar title={`${chemical.name}を編集`} onBack={onBack} />
       <div style={{ padding: 16 }}>
+        <div style={{ fontSize: 11.5, color: C.danger, marginBottom: 16 }}>
+          <span style={{ fontWeight: 700 }}>*</span> は必須項目です
+        </div>
+
         <SectionLabel>薬品名</SectionLabel>
         <input style={{ ...inputStyle, marginBottom: 20 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="例：メタノール" />
 
@@ -4206,17 +4399,17 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
           placeholder="例：67-56-1"
         />
         <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
-          普段の画面には表示されず、Excelへの書き出し時にのみ使用します
+          Excelへの書き出し時にのみ使用します
         </div>
 
-        <SectionLabel>保管場所（必須）</SectionLabel>
+        <SectionLabel>保管場所 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <select style={{ ...inputStyle, marginBottom: 20 }} value={locationName} onChange={(e) => setLocationName(e.target.value)}>
           {locationOptions.map((name) => (
             <option key={name} value={name}>{displayLocationName(name)}</option>
           ))}
         </select>
 
-        <SectionLabel>在庫量（必須）</SectionLabel>
+        <SectionLabel>在庫量 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
           <button
             type="button"
@@ -4296,10 +4489,34 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
         <textarea
           value={purpose}
           onChange={(e) => setPurpose(e.target.value)}
-          placeholder="例：DNA抽出時の洗浄用"
+          placeholder="例：抗酸化剤"
           rows={2}
           style={{ ...inputStyle, marginBottom: 20, resize: "none" }}
         />
+
+        <SectionLabel>リスクアセスメント対象</SectionLabel>
+        <button
+          type="button"
+          onClick={() => setRiskAssessment((v) => !v)}
+          style={{
+            width: "100%",
+            textAlign: "left",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            border: `1.5px solid ${riskAssessment ? C.danger : C.line}`,
+            background: riskAssessment ? C.dangerBg : C.paper,
+            borderRadius: 10,
+            padding: "11px 13px",
+            marginBottom: 26,
+            cursor: "pointer",
+          }}
+        >
+          <div style={{ flex: 1, fontSize: 13.5, fontWeight: 600, color: riskAssessment ? C.danger : C.inkSoft }}>
+            {riskAssessment ? "対象薬品" : "対象外"}
+          </div>
+          {riskAssessment && <Check size={16} color={C.danger} />}
+        </button>
 
         <SectionLabel>廃液分類（あとからいつでも変更できます）</SectionLabel>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 26 }}>
@@ -4417,7 +4634,20 @@ function LocationPage({ location, chemicals, onBack, onSelectChemical }) {
                   style={{ textAlign: "left", background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}
                 >
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{c.name}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{c.name}</div>
+                      {c.riskAssessment && (
+                        <span
+                          style={{
+                            display: "inline-flex", alignItems: "center", gap: 3,
+                            fontSize: 10.5, fontWeight: 700, color: C.danger, background: C.dangerBg,
+                            borderRadius: 20, padding: "2px 8px", whiteSpace: "nowrap",
+                          }}
+                        >
+                          <AlertTriangle size={10} /> アセス対象
+                        </span>
+                      )}
+                    </div>
                     <div style={{ marginTop: 5 }}>
                       <FormulaTag formula={c.formula} size={11.5} />
                     </div>
@@ -4510,6 +4740,10 @@ function AddLocationPage({ onBack, onSave }) {
           </span>
         </div>
 
+        <div style={{ fontSize: 11.5, color: C.danger, marginBottom: 16 }}>
+          <span style={{ fontWeight: 700 }}>*</span> は必須項目です
+        </div>
+
         <SectionLabel>保管場所名 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <input style={{ ...inputStyle, marginBottom: 16 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="例：薬品庫B 棚3" />
 
@@ -4583,7 +4817,7 @@ function WastePage({ waste, onBack, onOpenSubstance, onAddOther, onDispose }) {
               marginLeft: "auto",
               fontFamily: "'Roboto Mono', monospace",
               fontWeight: 700,
-              color: isTankAgeWarning(waste) ? C.danger : C.ink,
+              color: isTankAgeWarning(waste) ? C.warn : C.ink,
               whiteSpace: "nowrap",
               flex: "0 0 auto",
             }}
@@ -4612,7 +4846,7 @@ function WastePage({ waste, onBack, onOpenSubstance, onAddOther, onDispose }) {
         </div>
 
         {!disposed && isTankAgeWarning(waste) && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.dangerBg, border: `1px solid ${C.danger}`, borderRadius: 12, padding: "12px 14px", marginBottom: 12, color: C.danger, fontSize: 12.5, fontWeight: 700 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.warnBg, border: `1px solid ${C.warnBar}`, borderRadius: 12, padding: "12px 14px", marginBottom: 12, color: C.warn, fontSize: 12.5, fontWeight: 700 }}>
             <AlertTriangle size={16} />
             まもなく使用開始から1年経過します（{waste.tankStartDate}〜）。処分の準備をしてください。
           </div>
@@ -4788,17 +5022,10 @@ function WasteEntryPage({ entry, waste, onBack, onDelete }) {
           {entry.volumeMl} mL
         </div>
 
-        {waste.disposed ? (
+        {waste.disposed && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.lockBg, borderRadius: 12, padding: "12px 14px", color: C.inkSoft, fontSize: 13 }}>
             <Lock size={15} /> このタンクは処分済みのため編集できません
           </div>
-        ) : (
-          <button
-            onClick={() => onDelete(waste.id, entry)}
-            style={{ width: "100%", border: `1.5px solid ${C.danger}`, background: C.dangerBg, color: C.danger, fontSize: 14, fontWeight: 700, borderRadius: 12, padding: "12px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
-          >
-            <Trash2 size={16} /> この記録を削除
-          </button>
         )}
       </div>
     </div>
@@ -4819,6 +5046,7 @@ function WasteEntryAddPage({ waste, lockedSubstanceName, onBack, onSave }) {
   const [concentrationGL, setConcentrationGL] = useState("");
   const [volumeMl, setVolumeMl] = useState("");
   const [showCalc, setShowCalc] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   const finalSubstanceName = lockedSubstanceName || substanceName.trim();
   const canSave = date && personName.trim() && finalSubstanceName && concentrationGL !== "" && volumeMl !== "";
@@ -4834,7 +5062,12 @@ function WasteEntryAddPage({ waste, lockedSubstanceName, onBack, onSave }) {
     boxSizing: "border-box",
   };
 
-  const handleSave = () => {
+  const handleOpenConfirm = () => {
+    if (!canSave) return;
+    setConfirming(true);
+  };
+
+  const handleConfirmSave = () => {
     if (!canSave) return;
     onSave(waste.id, {
       id: "e_" + Date.now(),
@@ -4844,6 +5077,7 @@ function WasteEntryAddPage({ waste, lockedSubstanceName, onBack, onSave }) {
       concentrationGL: parseFloat(concentrationGL),
       volumeMl: parseFloat(volumeMl),
     });
+    setConfirming(false);
   };
 
   return (
@@ -4917,7 +5151,7 @@ function WasteEntryAddPage({ waste, lockedSubstanceName, onBack, onSave }) {
         </div>
 
         <button
-          onClick={handleSave}
+          onClick={handleOpenConfirm}
           disabled={!canSave}
           style={{ width: "100%", border: "none", background: canSave ? HEADER.bg : "#B7C0BC", color: "#fff", fontSize: 15, fontWeight: 600, borderRadius: 12, padding: "13px", cursor: canSave ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
         >
@@ -4930,6 +5164,39 @@ function WasteEntryAddPage({ waste, lockedSubstanceName, onBack, onSave }) {
           onClose={() => setShowCalc(false)}
           onApply={(resultGL) => setConcentrationGL(String(resultGL))}
         />
+      )}
+
+      {confirming && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(24,37,36,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20 }}>
+          <div style={{ background: C.paper, borderRadius: 16, padding: "20px 20px 18px", width: "100%", maxWidth: 340 }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: C.ink, marginBottom: 4 }}>この内容で保存しますか？</div>
+            <div style={{ fontSize: 12, color: C.inkSoft, marginBottom: 14 }}>投入記録として廃液タンクに追加されます。</div>
+
+            <div style={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: C.ink, lineHeight: 2, marginBottom: 18 }}>
+              <div><span style={{ color: C.inkSoft }}>タンク：</span>{waste.code}　{waste.name}</div>
+              <div><span style={{ color: C.inkSoft }}>薬品名：</span>{renderFormula(finalSubstanceName)}</div>
+              <div><span style={{ color: C.inkSoft }}>日付：</span>{date}</div>
+              <div><span style={{ color: C.inkSoft }}>氏名：</span>{personName.trim()}</div>
+              <div><span style={{ color: C.inkSoft }}>濃度：</span>{concentrationGL} g/L</div>
+              <div><span style={{ color: C.inkSoft }}>使用量：</span>{volumeMl} mL</div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={() => setConfirming(false)}
+                style={{ flex: 1, border: `1px solid ${C.line}`, background: "transparent", color: C.inkSoft, fontSize: 14, fontWeight: 600, borderRadius: 10, padding: "11px", cursor: "pointer" }}
+              >
+                修正する
+              </button>
+              <button
+                onClick={handleConfirmSave}
+                style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 14, fontWeight: 700, borderRadius: 10, padding: "11px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+              >
+                <Save size={14} /> 保存する
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -4988,7 +5255,7 @@ function ConcentrationCalcBody({ onApply }) {
         style={{ ...inputStyle, marginBottom: 16 }}
         value={mol}
         onChange={(e) => setMol(e.target.value)}
-        placeholder="使用した物質量"
+        placeholder="物質量"
       />
 
       <SectionLabel>体積（mL）</SectionLabel>
@@ -4998,7 +5265,7 @@ function ConcentrationCalcBody({ onApply }) {
         style={{ ...inputStyle, marginBottom: 22 }}
         value={volumeMl}
         onChange={(e) => setVolumeMl(e.target.value)}
-        placeholder="溶かした先の体積"
+        placeholder="体積"
       />
 
       <div
@@ -5080,14 +5347,28 @@ function ConcentrationCalcModal({ onClose, onApply }) {
 function RecordMassPage({ chemical, onBack, onSave }) {
   const [mass, setMass] = useState("");
   const [note, setNote] = useState("");
+  const [personName, setPersonName] = useState("");
   const [saved, setSaved] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   const today = new Date().toLocaleDateString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit" });
 
-  const handleSave = () => {
+  const previousAmount = chemical.stock?.amount ?? 0;
+  const parsedMass = parseFloat(mass);
+  const usedAmount = !isNaN(parsedMass) ? +(previousAmount - parsedMass).toFixed(2) : null;
+
+  const canSave = !isNaN(parsedMass) && !!personName.trim() && !!note.trim();
+
+  const handleOpenConfirm = () => {
+    if (!canSave) return;
+    setConfirming(true);
+  };
+
+  const handleConfirmSave = () => {
     const value = parseFloat(mass);
-    if (isNaN(value)) return;
-    onSave(chemical.id, value, note);
+    if (isNaN(value) || !personName.trim() || !note.trim()) return;
+    onSave(chemical.id, value, note.trim(), personName.trim());
+    setConfirming(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 1600);
     setMass("");
@@ -5098,6 +5379,10 @@ function RecordMassPage({ chemical, onBack, onSave }) {
     <div>
       <TopBar title="残量の記録" onBack={onBack} />
       <div style={{ padding: 16 }}>
+        <div style={{ fontSize: 11.5, color: C.danger, marginBottom: 16 }}>
+          <span style={{ fontWeight: 700 }}>*</span> は必須項目です
+        </div>
+
         <div style={{ display: "flex", alignItems: "center", gap: 10, background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", marginBottom: 20 }}>
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 600, fontSize: 15, color: C.ink }}>{chemical.name}</div>
@@ -5114,7 +5399,15 @@ function RecordMassPage({ chemical, onBack, onSave }) {
         <SectionLabel>記録日</SectionLabel>
         <div style={{ fontSize: 14, color: C.inkSoft, marginBottom: 18 }}>{today}</div>
 
-        <SectionLabel>使用後の重量（残っている量）（必須）</SectionLabel>
+        <SectionLabel>氏名 <span style={{ color: C.danger }}>*</span></SectionLabel>
+        <input
+          style={{ width: "100%", border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "10px 13px", fontSize: 14.5, color: C.ink, fontFamily: "'Inter', sans-serif", boxSizing: "border-box", marginBottom: 18 }}
+          value={personName}
+          onChange={(e) => setPersonName(e.target.value)}
+          placeholder="氏名"
+        />
+
+        <SectionLabel>使用後の重量（残量）</SectionLabel>
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.paper, border: `1.5px solid ${C.line}`, borderRadius: 12, padding: "10px 14px", marginBottom: 6 }}>
           <input
             type="number"
@@ -5126,11 +5419,27 @@ function RecordMassPage({ chemical, onBack, onSave }) {
           />
           <span style={{ fontSize: 14, color: C.inkSoft, fontWeight: 600 }}>g</span>
         </div>
-        <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 18 }}>
+        <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 6 }}>
           使用後、容器を含めた薬品の重量を測って入力してください。入力した値がそのまま新しい在庫量になります。
         </div>
 
-        <SectionLabel>メモ（任意）</SectionLabel>
+        {usedAmount !== null && (
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            background: usedAmount >= 0 ? C.okBg : C.dangerBg,
+            border: `1px solid ${usedAmount >= 0 ? C.line : C.danger}`,
+            borderRadius: 10, padding: "10px 14px", marginBottom: 18,
+          }}>
+            <span style={{ fontSize: 12.5, color: C.inkSoft, fontWeight: 600 }}>
+              {usedAmount >= 0 ? "今回の使用量" : "増加（在庫の訂正）"}
+            </span>
+            <span style={{ fontFamily: "'Roboto Mono', monospace", fontSize: 16, fontWeight: 700, color: usedAmount >= 0 ? C.ink : C.danger }}>
+              {Math.abs(usedAmount)} g
+            </span>
+          </div>
+        )}
+
+        <SectionLabel>使用目的 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <textarea
           value={note}
           onChange={(e) => setNote(e.target.value)}
@@ -5140,9 +5449,9 @@ function RecordMassPage({ chemical, onBack, onSave }) {
         />
 
         <button
-          onClick={handleSave}
-          disabled={!mass}
-          style={{ width: "100%", border: "none", background: mass ? HEADER.bg : "#B7C0BC", color: "#fff", fontSize: 15, fontWeight: 600, borderRadius: 12, padding: "13px", cursor: mass ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+          onClick={handleOpenConfirm}
+          disabled={!canSave}
+          style={{ width: "100%", border: "none", background: canSave ? HEADER.bg : "#B7C0BC", color: "#fff", fontSize: 15, fontWeight: 600, borderRadius: 12, padding: "13px", cursor: canSave ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
         >
           <Save size={16} /> 在庫を更新する
         </button>
@@ -5153,6 +5462,44 @@ function RecordMassPage({ chemical, onBack, onSave }) {
           </div>
         )}
       </div>
+
+      {confirming && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(24,37,36,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20 }}>
+          <div style={{ background: C.paper, borderRadius: 16, padding: "20px 20px 18px", width: "100%", maxWidth: 340 }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: C.ink, marginBottom: 4 }}>この内容で保存しますか？</div>
+            <div style={{ fontSize: 12, color: C.inkSoft, marginBottom: 14 }}>保存すると在庫が更新され、使用記録として残ります。</div>
+
+            <div style={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: C.ink, lineHeight: 2, marginBottom: 18 }}>
+              <div><span style={{ color: C.inkSoft }}>薬品：</span>{chemical.name}</div>
+              <div><span style={{ color: C.inkSoft }}>記録日：</span>{today}</div>
+              <div><span style={{ color: C.inkSoft }}>氏名：</span>{personName.trim()}</div>
+              <div><span style={{ color: C.inkSoft }}>使用後の重量：</span>{mass} g</div>
+              {usedAmount !== null && (
+                <div>
+                  <span style={{ color: C.inkSoft }}>{usedAmount >= 0 ? "使用量：" : "増加（在庫の訂正）：" }</span>
+                  {Math.abs(usedAmount)} g
+                </div>
+              )}
+              <div><span style={{ color: C.inkSoft }}>使用目的：</span>{note.trim()}</div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={() => setConfirming(false)}
+                style={{ flex: 1, border: `1px solid ${C.line}`, background: "transparent", color: C.inkSoft, fontSize: 14, fontWeight: 600, borderRadius: 10, padding: "11px", cursor: "pointer" }}
+              >
+                修正する
+              </button>
+              <button
+                onClick={handleConfirmSave}
+                style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 14, fontWeight: 700, borderRadius: 10, padding: "11px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+              >
+                <Save size={14} /> 保存する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -5172,6 +5519,7 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
   const [purpose, setPurpose] = useState("");
   const [wasteId, setWasteId] = useState(null);
   const [openDate, setOpenDate] = useState(""); // 最初から開いている（今開封したわけではない）薬品もあるため、初期状態では自動入力しない
+  const [riskAssessment, setRiskAssessment] = useState(false);
 
   // 薬品名がExcel台帳の名称と一致する場合、CASナンバーをまだ手入力していなければ自動で候補を入れる
   // （あとから手動で自由に修正・削除できる）
@@ -5219,6 +5567,7 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
       purpose: purpose.trim(),
       wasteId,
       openDate: isFull ? "" : openDate,
+      riskAssessment,
     });
   };
 
@@ -5226,13 +5575,17 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
     <div>
       <TopBar title="薬品を追加" onBack={onBack} />
       <div style={{ padding: 16 }}>
-        <SectionLabel>薬品名</SectionLabel>
+        <div style={{ fontSize: 11.5, color: C.danger, marginBottom: 16 }}>
+          <span style={{ fontWeight: 700 }}>*</span> は必須項目です
+        </div>
+
+        <SectionLabel>薬品名 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <input style={{ ...inputStyle, marginBottom: 16 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="例：メタノール" />
 
         <SectionLabel>分子式（任意）</SectionLabel>
         <input style={{ ...inputStyle, marginBottom: 4, fontFamily: "'Roboto Mono', monospace" }} value={formula} onChange={(e) => setFormula(e.target.value)} placeholder="例：CH3OH（略称でも可）" />
         <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 16 }}>
-          界面活性剤など略称で呼ぶものは、略称のまま入力してかまいません
+          略称などで入力してかまいません
         </div>
 
         <SectionLabel>CASナンバー（任意）</SectionLabel>
@@ -5243,16 +5596,16 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
           placeholder="例：67-56-1"
         />
         <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 16 }}>
-          Excelへの一覧書き出し時に使用します
+          Excelへの書き出し時にのみ使用します
         </div>
 
-        <SectionLabel>保管場所（必須）</SectionLabel>
+        <SectionLabel>保管場所 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <select style={{ ...inputStyle, marginBottom: 10 }} value={locationName} onChange={(e) => setLocationName(e.target.value)}>
           {LOCATION_OPTIONS.map((name) => (
             <option key={name} value={name}>{displayLocationName(name)}</option>
           ))}
         </select>
-        <SectionLabel>在庫量（必須）</SectionLabel>
+        <SectionLabel>在庫量 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
           <button
             type="button"
@@ -5333,10 +5686,34 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
         <textarea
           value={purpose}
           onChange={(e) => setPurpose(e.target.value)}
-          placeholder="例：NBT染色用"
+          placeholder="例：抗酸化剤"
           rows={2}
           style={{ ...inputStyle, marginBottom: 20, resize: "none" }}
         />
+
+        <SectionLabel>リスクアセスメント対象</SectionLabel>
+        <button
+          type="button"
+          onClick={() => setRiskAssessment((v) => !v)}
+          style={{
+            width: "100%",
+            textAlign: "left",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            border: `1.5px solid ${riskAssessment ? C.danger : C.line}`,
+            background: riskAssessment ? C.dangerBg : C.paper,
+            borderRadius: 10,
+            padding: "11px 13px",
+            marginBottom: 26,
+            cursor: "pointer",
+          }}
+        >
+          <div style={{ flex: 1, fontSize: 13.5, fontWeight: 600, color: riskAssessment ? C.danger : C.inkSoft }}>
+            {riskAssessment ? "対象薬品" : "対象外"}
+          </div>
+          {riskAssessment && <Check size={16} color={C.danger} />}
+        </button>
 
         <SectionLabel>廃液分類（任意・あとから編集できます）</SectionLabel>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 26 }}>
@@ -5576,6 +5953,177 @@ function RestoreBackupPreviewPage({ backupId, onBack, onRestore }) {
               )}
             </button>
           </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  管理者メニュー（Excel出力・復元・使用記録の消去をまとめる）                */
+/* ------------------------------------------------------------------ */
+
+function AdminMenuPage({ onBack, onExport, onOpenRestore, onOpenDelete }) {
+  const items = [
+    { icon: Download, label: "薬品一覧をExcelで書き出す", onClick: onExport },
+    { icon: RotateCcw, label: "バックアップから復元する", onClick: onOpenRestore },
+    { icon: Trash2, label: "使用記録を消去する", onClick: onOpenDelete },
+  ];
+  return (
+    <div>
+      <TopBar title="管理者メニュー" onBack={onBack} />
+      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+        {items.map(({ icon: Icon, label, onClick }) => (
+          <button
+            key={label}
+            onClick={onClick}
+            style={{ width: "100%", textAlign: "left", background: C.paper, border: `1px solid ${C.line}`, borderRadius: 14, padding: "14px 16px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12 }}
+          >
+            <Icon size={18} color={C.tealDeep} />
+            <div style={{ flex: 1, fontWeight: 600, fontSize: 14.5, color: C.ink }}>{label}</div>
+            <Chevron />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  使用記録の消去（管理者専用）                                          */
+/* ------------------------------------------------------------------ */
+
+function UsageEntriesDeletePage({ onBack, onDelete }) {
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [checked, setChecked] = useState(false);
+  const [matches, setMatches] = useState([]);
+  const [deleting, setDeleting] = useState(false);
+  const [resultCount, setResultCount] = useState(null);
+
+  const resetCheck = () => {
+    setChecked(false);
+    setMatches([]);
+    setResultCount(null);
+  };
+
+  const rangeValid = !!fromDate && !!toDate && fromDate <= toDate;
+
+  const handleCheck = async () => {
+    if (!rangeValid) return;
+    setChecking(true);
+    resetCheck();
+    try {
+      const all = await getUsageEntriesForExport();
+      const filtered = all.filter((u) => {
+        const date = u.date || "";
+        return date >= fromDate && date <= toDate;
+      });
+      setMatches(filtered);
+      setChecked(true);
+    } catch (e) {
+      toastFail("使用記録の件数確認", e);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const preview = matches
+    .slice()
+    .sort((a, b) => (b.date || "").localeCompare(a.date || ""))
+    .slice(0, 5);
+
+  const handleExecute = () => {
+    if (!checked || matches.length === 0) return;
+    if (typeof window !== "undefined" && window.confirm) {
+      const ok = window.confirm(
+        `${fromDate} 〜 ${toDate} の使用記録 ${matches.length}件を削除します。\n削除前にusageEntriesBackupへ確実に複製されますが、この画面から元に戻すことはできません。\n本当に削除しますか？`
+      );
+      if (!ok) return;
+    }
+    setDeleting(true);
+    onDelete(matches)
+      .then((count) => {
+        setResultCount(count);
+        setMatches([]);
+        setChecked(false);
+      })
+      .catch((e) => toastFail("使用記録の削除", e))
+      .finally(() => setDeleting(false));
+  };
+
+  return (
+    <div>
+      <TopBar title="使用記録の消去" onBack={onBack} />
+      <div style={{ padding: 16, paddingBottom: 100 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: C.okBg, border: `1px solid #C6D3E3`, borderRadius: 10, padding: "12px 14px", marginBottom: 20 }}>
+          <Info size={15} color={C.tealDeep} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div style={{ fontSize: 12, color: C.tealDeep, lineHeight: 1.7 }}>
+            指定した期間の「使用記録」（誰が・いつ・何のために・どれだけ使ったか）だけを削除します。薬品の在庫やその他のデータには影響しません。使用記録は自動バックアップでusageEntriesBackupへ複製されており、削除の直前にも未バックアップ分を追いつかせてから消すため、消した記録もそちらに残ります（アプリ画面からの復元は未対応です）。
+          </div>
+        </div>
+
+        <SectionLabel>開始日</SectionLabel>
+        <input
+          type="date"
+          value={fromDate}
+          onChange={(e) => { setFromDate(e.target.value); resetCheck(); }}
+          style={{ width: "100%", border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "10px 13px", fontSize: 14.5, color: C.ink, fontFamily: "'Inter', sans-serif", boxSizing: "border-box", marginBottom: 14 }}
+        />
+
+        <SectionLabel>終了日</SectionLabel>
+        <input
+          type="date"
+          value={toDate}
+          onChange={(e) => { setToDate(e.target.value); resetCheck(); }}
+          style={{ width: "100%", border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "10px 13px", fontSize: 14.5, color: C.ink, fontFamily: "'Inter', sans-serif", boxSizing: "border-box", marginBottom: 6 }}
+        />
+        <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
+          両方の日付を指定してください（開始日・終了日を含む期間が対象になります）。
+        </div>
+
+        <button
+          onClick={handleCheck}
+          disabled={!rangeValid || checking}
+          style={{ width: "100%", border: `1.5px solid ${C.line}`, background: C.paper, color: rangeValid ? C.ink : C.inkSoft, fontSize: 14, fontWeight: 600, borderRadius: 12, padding: "12px", cursor: rangeValid && !checking ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 20 }}
+        >
+          <Search size={15} /> {checking ? "確認しています…" : "対象件数を確認する"}
+        </button>
+
+        {checked && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: C.ink, marginBottom: 10 }}>
+              対象：{matches.length}件
+            </div>
+            {matches.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {preview.map((u) => (
+                  <div key={u.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 12.5, color: C.inkSoft }}>
+                    <span style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 600, color: C.ink }}>{u.date}</span>
+                    {"　"}{u.chemicalName || ""}・{u.personName || ""}・{u.amount ?? ""}{u.unit || "g"}
+                  </div>
+                ))}
+                {matches.length > preview.length && (
+                  <div style={{ fontSize: 12, color: C.inkSoft, textAlign: "center" }}>他 {matches.length - preview.length}件</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        <button
+          onClick={handleExecute}
+          disabled={!checked || matches.length === 0 || deleting}
+          style={{ width: "100%", border: "none", background: checked && matches.length > 0 && !deleting ? C.danger : "#B7C0BC", color: "#fff", fontSize: 14.5, fontWeight: 700, borderRadius: 12, padding: "13px", cursor: checked && matches.length > 0 && !deleting ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+        >
+          <Trash2 size={16} /> {deleting ? "削除しています…" : matches.length > 0 ? `${matches.length}件を完全に削除する` : "対象を確認してください"}
+        </button>
+
+        {resultCount !== null && (
+          <div style={{ marginTop: 14, textAlign: "center", fontSize: 13, fontWeight: 600, color: C.tealDeep, background: C.okBg, borderRadius: 10, padding: "10px" }}>
+            {resultCount}件の使用記録を削除しました。
+          </div>
         )}
       </div>
     </div>
@@ -5962,13 +6510,35 @@ const toggleTheme = () => {
     if (tab) setHomeTab(tab);
   };
 
-  const handleSaveMass = async (chemId, remaining) => {
+  const handleSaveMass = async (chemId, remaining, note, personName) => {
     const chem = chemicals.find((c) => c.id === chemId);
     if (!chem) return;
+    const previousAmount = chem.stock?.amount ?? 0;
     const newAmount = Math.max(0, +remaining.toFixed(2));
+    const usedAmount = +(previousAmount - newAmount).toFixed(2);
     try{
       await withDbTimeout(db.collection("chemicals").doc(chemId).update({ "stock.amount": newAmount }), "saveMass-update-timeout");
-      bumpSyncVersion(["chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+      // 残量が減っていた場合だけ「使用記録」として1件残す。増えた場合（在庫の訂正）は使用扱いにしない。
+      if (usedAmount > 0 && personName) {
+        try {
+          await withDbTimeout(db.collection("usageEntries").doc("u_" + Date.now()).set({
+            chemicalId: chem.id,
+            chemicalName: chem.name,
+            date: todayDateStr(),
+            personName,
+            purpose: note || "",
+            amount: usedAmount,
+            unit: "g",
+            createdAt: Date.now(),
+          }), "addUsageEntry-set-timeout");
+        } catch (usageErr) {
+          console.warn("使用記録の保存に失敗（在庫は更新済みです）:", usageErr);
+          toastFail("使用記録の保存（在庫は更新済みです）", usageErr);
+        }
+        bumpSyncVersion(["chemicals", "usageEntries"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+      } else {
+        bumpSyncVersion(["chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+      }
     }catch(e){ toastFail("残量の保存", e); }
   };
 
@@ -5986,9 +6556,9 @@ const toggleTheme = () => {
   };
 
   // 薬品一覧をExcelファイル（.xlsx）として書き出す。棚卸・監査などアプリの外で使いたい時用。
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
     try {
-      const rows = chemicals.map((c) => {
+      const chemToRow = (c) => {
         const status = autoStatus(c.stock);
         const waste = wasteCategories.find((w) => w.id === c.wasteId);
         return {
@@ -6003,14 +6573,91 @@ const toggleTheme = () => {
           廃液分類: waste ? `${waste.code} ${waste.name}` : "",
           備考: c.purpose || "",
         };
-      });
-      const ws = XLSX.utils.json_to_sheet(rows);
-      ws["!cols"] = [
+      };
+      const targetChems = chemicals.filter((c) => c.riskAssessment);
+      const otherChems = chemicals.filter((c) => !c.riskAssessment);
+      const chemColWidths = [
         { wch: 26 }, { wch: 20 }, { wch: 14 }, { wch: 12 }, { wch: 10 },
         { wch: 10 }, { wch: 8 }, { wch: 12 }, { wch: 16 }, { wch: 24 },
       ];
+
+      // 薬品一覧シート：リスクアセスメント対象／対象外で上下に分けて、同じシート内に並べる
+      const chemWs = XLSX.utils.aoa_to_sheet([["■ リスクアセスメント対象"]]);
+      if (targetChems.length > 0) {
+        XLSX.utils.sheet_add_json(chemWs, targetChems.map(chemToRow), { origin: -1 });
+      } else {
+        XLSX.utils.sheet_add_aoa(chemWs, [["該当する薬品はありません"]], { origin: -1 });
+      }
+      XLSX.utils.sheet_add_aoa(chemWs, [[], ["■ 対象外"]], { origin: -1 });
+      if (otherChems.length > 0) {
+        XLSX.utils.sheet_add_json(chemWs, otherChems.map(chemToRow), { origin: -1 });
+      } else {
+        XLSX.utils.sheet_add_aoa(chemWs, [["該当する薬品はありません"]], { origin: -1 });
+      }
+      chemWs["!cols"] = chemColWidths;
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "薬品一覧");
+      XLSX.utils.book_append_sheet(wb, chemWs, "薬品一覧");
+
+      // 使用記録シート：対象になっている薬品の記録かどうかで上下に分けて、同じシート内に並べる
+      let usageEntries = [];
+      let usageFetchFailed = false;
+      try {
+        // 常時購読していないため、ここで初めて1回だけ取得する。
+        usageEntries = await getUsageEntriesForExport();
+      } catch (usageErr) {
+        console.warn("使用記録の取得に失敗:", usageErr);
+        usageFetchFailed = true;
+        toastFail("使用記録の取得", usageErr);
+      }
+
+      const riskChemIds = new Set(targetChems.map((c) => c.id));
+      const riskChemNames = new Set(targetChems.map((c) => c.name));
+      const isTargetEntry = (u) => {
+        if (u.chemicalId) return riskChemIds.has(u.chemicalId);
+        return !!(u.chemicalName && riskChemNames.has(u.chemicalName));
+      };
+      const usageChemById = new Map(chemicals.map((c) => [c.id, c]));
+      const usageChemByName = new Map(chemicals.map((c) => [c.name, c]));
+      const findChemForUsage = (u) =>
+        (u.chemicalId && usageChemById.get(u.chemicalId)) ||
+        (u.chemicalName && usageChemByName.get(u.chemicalName));
+      const usageToRow = (u) => {
+        const chem = findChemForUsage(u);
+        return {
+          薬品名: u.chemicalName || "",
+          分子式: chem?.formula || "",
+          "CASナンバー": (chem && chem.cas && chem.cas.trim()) || CAS_LOOKUP[u.chemicalName] || "",
+          日付: u.date || "",
+          氏名: u.personName || "",
+          使用目的: u.purpose || "",
+          "使用量(g)": u.amount ?? "",
+        };
+      };
+      const sortedUsage = usageEntries.slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+      const targetUsageRows = sortedUsage.filter(isTargetEntry).map(usageToRow);
+      const otherUsageRows = sortedUsage.filter((u) => !isTargetEntry(u)).map(usageToRow);
+
+      const usageWs = XLSX.utils.aoa_to_sheet([["■ リスクアセスメント対象"]]);
+      if (usageFetchFailed) {
+        XLSX.utils.sheet_add_aoa(usageWs, [["使用記録の取得に失敗しました（権限エラーの可能性があります。時間をおいて再試行してください）"]], { origin: -1 });
+      } else if (targetUsageRows.length > 0) {
+        XLSX.utils.sheet_add_json(usageWs, targetUsageRows, { origin: -1 });
+      } else {
+        XLSX.utils.sheet_add_aoa(usageWs, [["該当する使用記録はありません"]], { origin: -1 });
+      }
+      XLSX.utils.sheet_add_aoa(usageWs, [[], ["■ 対象外"]], { origin: -1 });
+      if (!usageFetchFailed) {
+        if (otherUsageRows.length > 0) {
+          XLSX.utils.sheet_add_json(usageWs, otherUsageRows, { origin: -1 });
+        } else {
+          XLSX.utils.sheet_add_aoa(usageWs, [["該当する使用記録はありません"]], { origin: -1 });
+        }
+      }
+      usageWs["!cols"] = [
+        { wch: 26 }, { wch: 20 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 12 },
+      ];
+      XLSX.utils.book_append_sheet(wb, usageWs, "使用記録");
+
       const today = new Date();
       const y = today.getFullYear();
       const m = String(today.getMonth() + 1).padStart(2, "0");
@@ -6019,6 +6666,20 @@ const toggleTheme = () => {
     } catch (e) {
       toastFail("薬品一覧のエクスポート", e);
     }
+  };
+
+  // 管理者メニュー：Excel出力／復元／使用記録消去をまとめて1つの鍵ボタンの奥に置く。
+  // パスコードはメニューを開く時に1回だけ要求する。
+  const handleAdminMenuRequest = () => {
+    setPasscodeGate({
+      title: "管理者確認",
+      message: "管理者メニューを開くには、パスコードを入力してください。",
+      onCancel: () => setPasscodeGate(null),
+      onConfirm: () => {
+        setPasscodeGate(null);
+        push({ view: "adminMenu" });
+      },
+    });
   };
 
   // 復元（管理者専用）：過去のバックアップから内容を選んで復元する。誤操作防止のため、
@@ -6057,7 +6718,7 @@ const toggleTheme = () => {
     );
   };
 
-  const handleAddChemical = async ({ name, formula, cas, locationName, subLocation, amount, isFull, purpose, wasteId, openDate }) => {
+  const handleAddChemical = async ({ name, formula, cas, locationName, subLocation, amount, isFull, purpose, wasteId, openDate, riskAssessment }) => {
     const location = resolveLocation(locationName);
     const newId = "c_" + Date.now();
     const stock = isFull ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" } : { amount, capacity: 0, unit: "g", known: true };
@@ -6065,13 +6726,13 @@ const toggleTheme = () => {
       await withDbTimeout(db
         .collection("chemicals")
         .doc(newId)
-        .set({ name, formula: formula || "", cas: cas || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null, openDate: openDate || "" }), "addChemical-set-timeout");
+        .set({ name, formula: formula || "", cas: cas || "", location, subLocation: subLocation || "", stock, purpose: purpose || "", wasteId: wasteId || null, openDate: openDate || "", riskAssessment: !!riskAssessment }), "addChemical-set-timeout");
       bumpSyncVersion(["chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
       pop();
     }catch(e){ toastFail("薬品の追加", e); }
   };
 
-  const handleEditChemical = async (chem, { name, formula, cas, locationName, subLocation, wasteId, stock, purpose, openDate }) => {
+  const handleEditChemical = async (chem, { name, formula, cas, locationName, subLocation, wasteId, stock, purpose, openDate, riskAssessment }) => {
     const updates = {
       name: (name || chem.name || "").trim(),
       formula: formula || "",
@@ -6081,6 +6742,7 @@ const toggleTheme = () => {
       wasteId: wasteId || null,
       purpose: purpose || "",
       openDate: openDate || "",
+      riskAssessment: !!riskAssessment,
     };
     if (stock) updates.stock = stock;
     try{
@@ -6363,20 +7025,12 @@ const handleDeleteWasteCategories = (wastes) => {
         <RefreshCw size={16} />
       </button>
       <button
-        onClick={handleExportExcel}
-        aria-label="薬品一覧をExcelで書き出す"
-        title="薬品一覧をExcelで書き出す"
+        onClick={handleAdminMenuRequest}
+        aria-label="管理者メニュー"
+        title="管理者メニュー"
         style={{ border: "none", background: "rgba(255,255,255,.14)", color: HEADER.text, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 999, padding: 0, flex: "0 0 auto" }}
       >
-        <Download size={16} />
-      </button>
-      <button
-        onClick={handleRestoreRequest}
-        aria-label="バックアップから復元する（管理者のみ）"
-        title="バックアップから復元する（管理者のみ）"
-        style={{ border: "none", background: "rgba(255,255,255,.14)", color: HEADER.text, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 999, padding: 0, flex: "0 0 auto" }}
-      >
-        <RotateCcw size={16} />
+        <Lock size={16} />
       </button>
       <button
         onClick={toggleTheme}
@@ -6538,7 +7192,6 @@ const handleDeleteWasteCategories = (wastes) => {
               waste={findWaste(current.wasteId)}
               entry={findWaste(current.wasteId).entries.find((e) => e.id === current.entryId)}
               onBack={pop}
-              onDelete={handleDeleteWasteEntry}
             />
           ) : (
             <MissingItemNotice title="投入記録が見つかりません" message="この投入記録はすでに削除されているか、データが見つかりませんでした。" onBack={pop} />
@@ -6593,6 +7246,19 @@ const handleDeleteWasteCategories = (wastes) => {
 
         {current.view === "restorePreview" && (
           <RestoreBackupPreviewPage backupId={current.backupId} onBack={pop} onRestore={handleRunRestore} />
+        )}
+
+        {current.view === "adminMenu" && (
+          <AdminMenuPage
+            onBack={pop}
+            onExport={() => { handleExportExcel(); pop(); }}
+            onOpenRestore={() => push({ view: "restoreList" })}
+            onOpenDelete={() => push({ view: "deleteUsageEntries" })}
+          />
+        )}
+
+        {current.view === "deleteUsageEntries" && (
+          <UsageEntriesDeletePage onBack={pop} onDelete={deleteUsageEntriesByIds} />
         )}
       </div>
       {passcodeGate && (
