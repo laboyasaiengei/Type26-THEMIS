@@ -134,7 +134,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='2.0';
+const CAESAR_APP_VERSION='2.0.1';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -3357,7 +3357,7 @@ function SearchTab({ chemicals, onSelect, query, setQuery }) {
       .filter((c) =>
         [c.name, c.formula, c.purpose].filter(Boolean).join(" ").toLowerCase().includes(q)
       )
-      .sort((a, b) => stockSortValue(a.stock) - stockSortValue(b.stock));
+      .sort((a, b) => (a.name || "").localeCompare(b.name || "", "ja"));
   }, [query, chemicals]);
 
   return (
@@ -3406,7 +3406,20 @@ function SearchTab({ chemicals, onSelect, query, setQuery }) {
                 style={{ textAlign: "left", background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", cursor: "pointer", display: "flex", alignItems: "center", gap: 10 }}
               >
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 15, color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{c.name}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <div style={{ fontWeight: 600, fontSize: 15, color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{c.name}</div>
+                    {c.riskAssessment && (
+                      <span
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 3,
+                          fontSize: 10.5, fontWeight: 700, color: C.danger, background: C.dangerBg,
+                          borderRadius: 20, padding: "2px 8px", whiteSpace: "nowrap",
+                        }}
+                      >
+                        <AlertTriangle size={10} /> アセス対象
+                      </span>
+                    )}
+                  </div>
                   <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
                     <FormulaTag formula={c.formula} size={12} />
                   </div>
@@ -3774,7 +3787,11 @@ function WasteTab({ wasteCategories, onOpenWaste, onOpenCalc, onOpenArchive, onA
                 textAlign: "left",
                 background: isUnused ? C.lockBg : C.paper,
                 border: isUnused ? `1.5px dashed ${C.line}` : `1px solid ${C.line}`,
-                borderLeft: `4px solid ${ageWarn ? C.warnBar : isUnused ? C.line : accent.deep}`,
+                // 左側のアクセント線はborderLeftではなくinset box-shadowで描画する。
+                // borderLeftだと、ダークモード起動直後にSafari/WebKit側の再描画が
+                // 間に合わず、この部分だけ色が反映されないことがあるため
+                // （ライト⇄ダーク切替で直ることがあるのはこの再描画漏れが原因）。
+                boxShadow: `inset 4px 0 0 0 ${ageWarn ? C.warnBar : isUnused ? C.line : accent.deep}`,
                 borderRadius: 12,
                 padding: "13px 14px",
                 overflow: "hidden",
@@ -4385,7 +4402,7 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
           <span style={{ fontWeight: 700 }}>*</span> は必須項目です
         </div>
 
-        <SectionLabel>薬品名<span style={{ color: C.danger }}>*</span></SectionLabel>
+        <SectionLabel>薬品名 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <input style={{ ...inputStyle, marginBottom: 20 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="例：メタノール" />
 
         <SectionLabel>分子式（任意）</SectionLabel>
@@ -5407,7 +5424,7 @@ function RecordMassPage({ chemical, onBack, onSave }) {
           placeholder="氏名"
         />
 
-        <SectionLabel>使用後の重量 <span style={{ color: C.danger }}>*</span></SectionLabel>
+        <SectionLabel>使用後の重量  <span style={{ color: C.danger }}>*</span></SectionLabel>
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.paper, border: `1.5px solid ${C.line}`, borderRadius: 12, padding: "10px 14px", marginBottom: 6 }}>
           <input
             type="number"
@@ -5508,7 +5525,7 @@ function RecordMassPage({ chemical, onBack, onSave }) {
 /*  薬品追加ページ                                                      */
 /* ------------------------------------------------------------------ */
 
-function AddChemicalPage({ wasteCategories, onBack, onSave }) {
+function AddChemicalPage({ chemicals, wasteCategories, onBack, onSave }) {
   const [name, setName] = useState("");
   const [formula, setFormula] = useState("");
   const [cas, setCas] = useState("");
@@ -5520,6 +5537,7 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
   const [wasteId, setWasteId] = useState(null);
   const [openDate, setOpenDate] = useState(""); // 最初から開いている（今開封したわけではない）薬品もあるため、初期状態では自動入力しない
   const [riskAssessment, setRiskAssessment] = useState(false);
+  const [riskTouched, setRiskTouched] = useState(false);
 
   // 薬品名がExcel台帳の名称と一致する場合、CASナンバーをまだ手入力していなければ自動で候補を入れる
   // （あとから手動で自由に修正・削除できる）
@@ -5528,6 +5546,30 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
     const known = CAS_LOOKUP[name.trim()];
     if (known) setCas(known);
   }, [name, casTouched]);
+
+  // 薬品名または分子式が、すでに登録済みの薬品と一致する場合、
+  // CASナンバー・リスクアセスメント対象をその薬品と同じ内容で自動入力する
+  // （名称一致を優先、どちらも手動で修正すればそれ以降は上書きしない）
+  const matchedChemical = useMemo(() => {
+    if (!chemicals || !chemicals.length) return null;
+    const n = name.trim().toLowerCase();
+    const f = formula.trim().toLowerCase();
+    if (n) {
+      const byName = chemicals.find((c) => c.name && c.name.trim().toLowerCase() === n);
+      if (byName) return byName;
+    }
+    if (f) {
+      const byFormula = chemicals.find((c) => c.formula && c.formula.trim().toLowerCase() === f);
+      if (byFormula) return byFormula;
+    }
+    return null;
+  }, [name, formula, chemicals]);
+
+  useEffect(() => {
+    if (!matchedChemical) return;
+    if (!casTouched && matchedChemical.cas) setCas(matchedChemical.cas);
+    if (!riskTouched) setRiskAssessment(!!matchedChemical.riskAssessment);
+  }, [matchedChemical]);
 
   // 「重量を記入」＝登録した時点で開封済み、とみなして開封日に今日の日付を自動で入れる
   // （FULLに切り替えた場合は未開封なのでクリアする。どちらも手動で修正可）
@@ -5694,7 +5736,7 @@ function AddChemicalPage({ wasteCategories, onBack, onSave }) {
         <SectionLabel>リスクアセスメント対象</SectionLabel>
         <button
           type="button"
-          onClick={() => setRiskAssessment((v) => !v)}
+          onClick={() => { setRiskAssessment((v) => !v); setRiskTouched(true); }}
           style={{
             width: "100%",
             textAlign: "left",
@@ -7222,7 +7264,7 @@ const handleDeleteWasteCategories = (wastes) => {
         )}
 
         {current.view === "addChemical" && (
-          <AddChemicalPage wasteCategories={wasteCategories} onBack={pop} onSave={handleAddChemical} />
+          <AddChemicalPage chemicals={chemicals} wasteCategories={wasteCategories} onBack={pop} onSave={handleAddChemical} />
         )}
 
         {current.view === "addLocation" && (
