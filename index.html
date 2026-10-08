@@ -132,7 +132,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='2.0.3';
+const CAESAR_APP_VERSION='2.0.3.1';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -4601,7 +4601,7 @@ function LocationPage({ location, chemicals, onBack, onSelectChemical }) {
 
   // 場所の中の細かい区画（例：1, 2, A, B）ごとにグループ化する。
   // 区画が未設定の薬品は「区画未設定」としてまとめて表示する。
-  // 各区画内は在庫量（g）の少ない順に並べる。
+  // 各区画内は薬品名のあいうえお順に並べる。
   const groups = useMemo(() => {
     const map = new Map();
     items.forEach((c) => {
@@ -4610,7 +4610,7 @@ function LocationPage({ location, chemicals, onBack, onSelectChemical }) {
       map.get(key).push(c);
     });
     const entries = Array.from(map.entries());
-    entries.forEach(([, list]) => list.sort((a, b) => stockSortValue(a.stock) - stockSortValue(b.stock)));
+    entries.forEach(([, list]) => list.sort((a, b) => (a.name || "").localeCompare(b.name || "", "ja")));
     entries.sort((a, b) => {
       if (a[0] === "") return 1;
       if (b[0] === "") return -1;
