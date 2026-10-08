@@ -132,7 +132,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='2.0.2';
+const CAESAR_APP_VERSION='2.0.3';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -5216,13 +5216,15 @@ function WasteEntryAddPage({ waste, lockedSubstanceName, onBack, onSave }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  g/L 換算計算ツール（分子量・物質量・体積から濃度g/Lを算出）              */
+/*  g/L 換算計算ツール（mol/L または % の濃度から濃度g/Lを算出）            */
 /* ------------------------------------------------------------------ */
 
 function ConcentrationCalcBody({ onApply }) {
   const [molarMass, setMolarMass] = useState("");
-  const [mol, setMol] = useState("");
-  const [volumeMl, setVolumeMl] = useState("");
+  const [molPerL, setMolPerL] = useState("");
+  const [percent, setPercent] = useState("");
+  const [pctType, setPctType] = useState("wv"); // "wv"=質量/体積% , "ww"=質量/質量%（密度が必要）
+  const [density, setDensity] = useState("");
 
   const inputStyle = {
     width: "100%",
@@ -5235,23 +5237,47 @@ function ConcentrationCalcBody({ onApply }) {
     boxSizing: "border-box",
   };
 
+  // 濃度欄は「mol/L」「%」の2種類。どちらか一方に入力されていれば、その単位で計算する。
+  //  ・mol/L → g/L = 濃度(mol/L) × 分子量(g/mol)   ※分子量が必要
+  //  ・% (w/v) → 質量/体積パーセント(g/100mL)として g/L = % × 10   ※分子量は不要
+  //  ・% (w/w) → 質量パーセントとして g/L = % × 10 × 密度(g/mL)   ※密度が必要
+  const hasMol = molPerL.trim() !== "";
+  const hasPct = percent.trim() !== "";
+  const both = hasMol && hasPct;
   const mm = parseFloat(molarMass);
-  const n = parseFloat(mol);
-  const v = parseFloat(volumeMl);
-  const valid = !isNaN(mm) && !isNaN(n) && !isNaN(v) && v > 0;
-  const massG = valid ? mm * n : null;
-  const resultGL = valid ? Math.round(((massG / v) * 1000) * 1000) / 1000 : null;
+  const cMol = parseFloat(molPerL);
+  const cPct = parseFloat(percent);
+  const rho = parseFloat(density);
+
+  let resultGL = null;
+  let formula = "";
+  if (!both) {
+    if (hasMol && !isNaN(cMol) && cMol >= 0 && !isNaN(mm) && mm > 0) {
+      resultGL = Math.round(cMol * mm * 1000) / 1000;
+      formula = `${mm} g/mol × ${cMol} mol/L`;
+    } else if (hasPct && !isNaN(cPct) && cPct >= 0) {
+      if (pctType === "wv") {
+        resultGL = Math.round(cPct * 10 * 1000) / 1000;
+        formula = `${cPct} % (w/v) × 10`;
+      } else if (!isNaN(rho) && rho > 0) {
+        resultGL = Math.round(cPct * 10 * rho * 1000) / 1000;
+        formula = `${cPct} % (w/w) × 10 × ${rho} g/mL`;
+      }
+    }
+  }
+  const valid = resultGL !== null;
 
   return (
     <div style={{ padding: 16 }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 8, background: C.okBg, border: `1px solid #C6D3E3`, borderRadius: 10, padding: "10px 13px", marginBottom: 20 }}>
         <Info size={15} color={C.inkSoft} style={{ marginTop: 1, flexShrink: 0 }} />
         <span style={{ fontSize: 12.5, color: C.inkSoft, lineHeight: 1.6 }}>
-          分子量・物質量(mol)・体積(mL) から、廃液記録に入力する濃度(g/L)を計算します。
+          モル濃度(mol/L)またはパーセント濃度(%)のどちらか一方を入力すると、廃液記録に入力する濃度(g/L)を計算します。
+          モル濃度の場合は分子量が必要です。パーセント濃度は「質量/体積％(w/v)」か「質量％(w/w)」を選んでください（w/w は密度が必要です）。
         </span>
       </div>
 
-      <SectionLabel>分子量（g/mol）</SectionLabel>
+      <SectionLabel>分子量（g/mol）<span style={{ fontWeight: 400, color: C.inkSoft }}>　※モル濃度の場合に必要</span></SectionLabel>
       <input
         type="number"
         inputMode="decimal"
@@ -5261,25 +5287,72 @@ function ConcentrationCalcBody({ onApply }) {
         placeholder="例：40.00（NaOH）"
       />
 
-      <SectionLabel>物質量（mol）</SectionLabel>
+      <SectionLabel>濃度（mol/L）</SectionLabel>
       <input
         type="number"
         inputMode="decimal"
         style={{ ...inputStyle, marginBottom: 16 }}
-        value={mol}
-        onChange={(e) => setMol(e.target.value)}
-        placeholder="物質量"
+        value={molPerL}
+        onChange={(e) => setMolPerL(e.target.value)}
+        placeholder="例：0.1"
       />
 
-      <SectionLabel>体積（mL）</SectionLabel>
+      <SectionLabel>濃度（%）</SectionLabel>
       <input
         type="number"
         inputMode="decimal"
-        style={{ ...inputStyle, marginBottom: 22 }}
-        value={volumeMl}
-        onChange={(e) => setVolumeMl(e.target.value)}
-        placeholder="体積"
+        style={{ ...inputStyle, marginBottom: 12 }}
+        value={percent}
+        onChange={(e) => setPercent(e.target.value)}
+        placeholder="例：5"
       />
+
+      <div style={{ display: "flex", gap: 8, marginBottom: hasPct && pctType === "ww" ? 12 : 12 }}>
+        {[["wv", "質量/体積 % (w/v)"], ["ww", "質量 % (w/w)"]].map(([k, label]) => (
+          <button
+            key={k}
+            type="button"
+            onClick={() => setPctType(k)}
+            style={{ flex: 1, border: `1.5px solid ${pctType === k ? C.tealDeep : C.line}`, background: pctType === k ? C.tealDeep : "transparent", color: pctType === k ? "#fff" : C.inkSoft, fontSize: 12.5, fontWeight: 600, borderRadius: 10, padding: "9px 6px", cursor: "pointer" }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 11.5, color: C.inkSoft, lineHeight: 1.6, marginBottom: 14 }}>
+        {pctType === "wv" ? "w/v：溶液100 mLあたりの溶質のg数（例：5% → 50 g/L）" : "w/w：溶液100 gあたりの溶質のg数。溶液の密度が必要です。"}
+      </div>
+
+      {pctType === "ww" && (
+        <>
+          <SectionLabel>溶液の密度（g/mL）<span style={{ fontWeight: 400, color: C.inkSoft }}>　※w/w %の場合に必要</span></SectionLabel>
+          <input
+            type="number"
+            inputMode="decimal"
+            style={{ ...inputStyle, marginBottom: 12 }}
+            value={density}
+            onChange={(e) => setDensity(e.target.value)}
+            placeholder="例：1.84（濃硫酸）"
+          />
+        </>
+      )}
+
+      {both && (
+        <div style={{ fontSize: 12.5, color: C.danger, lineHeight: 1.6, marginBottom: 12 }}>
+          mol/L と % の両方が入力されています。どちらか一方だけにしてください。
+        </div>
+      )}
+      {!both && hasMol && !isNaN(cMol) && (isNaN(mm) || mm <= 0) && (
+        <div style={{ fontSize: 12.5, color: C.danger, lineHeight: 1.6, marginBottom: 12 }}>
+          mol/L で計算するには分子量を入力してください。
+        </div>
+      )}
+      {!both && hasPct && !isNaN(cPct) && pctType === "ww" && (isNaN(rho) || rho <= 0) && (
+        <div style={{ fontSize: 12.5, color: C.danger, lineHeight: 1.6, marginBottom: 12 }}>
+          w/w % で計算するには溶液の密度を入力してください。
+        </div>
+      )}
+      <div style={{ height: 10 }} />
 
       <div
         style={{
@@ -5294,6 +5367,7 @@ function ConcentrationCalcBody({ onApply }) {
           {valid ? resultGL : "―"}
           <span style={{ fontSize: 15, fontWeight: 500 }}> g/L</span>
         </div>
+        {valid && <div style={{ fontSize: 11.5, color: "#fff", opacity: 0.8, marginTop: 6 }}>{formula}</div>}
       </div>
 
       {onApply ? (
