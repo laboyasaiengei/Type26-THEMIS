@@ -217,6 +217,9 @@ function User(props) { return (<IconBase {...props}><path d="M20 21v-2a4 4 0 0 0
 function FlaskConical(props) { return (<IconBase {...props}><path d="M10 2v6.29a2 2 0 0 1-.4 1.2L4.34 17.9A2 2 0 0 0 6 21h12a2 2 0 0 0 1.66-3.1L14.4 9.5a2 2 0 0 1-.4-1.2V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></IconBase>); }
 
 function Plus(props) { return (<IconBase {...props}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></IconBase>); }
+function ArrowUp(props) { return (<IconBase {...props}><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></IconBase>); }
+function ArrowDown(props) { return (<IconBase {...props}><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></IconBase>); }
+function ArrowUpDown(props) { return (<IconBase {...props}><polyline points="7 15 12 20 17 15"/><polyline points="7 9 12 4 17 9"/></IconBase>); }
 function Pencil(props) { return (<IconBase {...props}><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></IconBase>); }
 function Check(props) { return (<IconBase {...props}><polyline points="20 6 9 17 4 12"/></IconBase>); }
 function Calculator(props) { return (<IconBase {...props}><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="10" x2="8" y2="10"/><line x1="12" y1="10" x2="12" y2="10"/><line x1="16" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="8" y2="14"/><line x1="12" y1="14" x2="12" y2="14"/><line x1="16" y1="14" x2="16" y2="14"/><line x1="8" y1="18" x2="8" y2="18"/><line x1="12" y1="18" x2="12" y2="18"/><line x1="16" y1="18" x2="16" y2="18"/></IconBase>); }
@@ -2920,6 +2923,82 @@ function locationMergeKey(loc) {
   return "name:" + canon;
 }
 
+// 保管場所の一覧を組み立てる（保管場所タブ・薬品の保管場所セレクトで共通）。
+// 薬品が置かれている場所＋「場所を追加」だけされた場所を合流し、
+// 場所メタ情報の order → 既定ランク → 名前 の順に並べる。
+function buildLocationList(chemicals, extraLocations) {
+  const map = new Map();
+  chemicals.forEach((c) => {
+    const key = locationMergeKey(c.location);
+    if (!map.has(key)) {
+      map.set(key, { ...c.location, name: canonicalLocationName(c.location.name), note: cleanLocationNote(c.location.note), items: [] });
+    }
+    map.get(key).items.push(c);
+  });
+  // まだ薬品が置かれていない、追加だけされた場所もここに合流させる
+  (extraLocations || []).forEach((l) => {
+    const key = locationMergeKey(l);
+    if (!map.has(key)) map.set(key, { id: l.id, name: canonicalLocationName(l.name), note: cleanLocationNote(l.note), items: [] });
+  });
+  // 場所メタ情報(extraLocations)にorderがあれば、薬品由来の場所にもマージする
+  const metaById = new Map((extraLocations || []).map((l) => [l.id, l]));
+  const list = Array.from(map.values()).map((loc) => ({
+    ...loc,
+    order: typeof metaById.get(loc.id)?.order === "number" ? metaById.get(loc.id).order : null,
+  }));
+  list.sort((a, b) => {
+    const ao = a.order === null ? Infinity : a.order;
+    const bo = b.order === null ? Infinity : b.order;
+    if (ao !== bo) return ao - bo;
+    const ra = locationSortRank(a.name);
+    const rb = locationSortRank(b.name);
+    if (ra !== rb) return ra - rb;
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
+  return list;
+}
+
+// 薬品の追加・編集で選べる保管場所の名前一覧。
+// 保管場所タブと同じ並び順で、「場所を追加」やサブロケーション追加で作った場所も含める。
+// 「1-1」「1-2」…のような区画は、まとまりの位置に番号順で並べる。
+function buildLocationOptionNames(chemicals, extraLocations) {
+  // 既定の選択肢（LOCATION_OPTIONS）のうち、まだ登録されていないものも候補に含める
+  const known = new Set([
+    ...chemicals.map((c) => canonicalLocationName(c.location.name)),
+    ...(extraLocations || []).map((l) => canonicalLocationName(l.name)),
+  ]);
+  const defaults = LOCATION_OPTIONS
+    .filter((n) => !known.has(canonicalLocationName(n)))
+    .map((n) => ({ id: "default:" + n, name: n, note: "" }));
+  const list = buildLocationList(chemicals, [...(extraLocations || []), ...defaults]);
+  const seen = new Set();
+  const names = [];
+  const add = (name) => {
+    const canon = canonicalLocationName(name);
+    if (!canon || isLocationUnregistered({ name: canon }) || seen.has(canon)) return;
+    seen.add(canon);
+    names.push(canon);
+  };
+  const subNumber = (loc) => parseInt(canonicalLocationName(loc.name).split("-")[1], 10);
+  const groupMembers = new Map();
+  list.forEach((loc) => {
+    const prefix = locationGroupPrefix(loc.name);
+    if (!prefix) return;
+    if (!groupMembers.has(prefix)) groupMembers.set(prefix, []);
+    groupMembers.get(prefix).push(loc);
+  });
+  groupMembers.forEach((members) => members.sort((a, b) => subNumber(a) - subNumber(b)));
+  const emitted = new Set();
+  list.forEach((loc) => {
+    const prefix = locationGroupPrefix(loc.name);
+    if (!prefix) { add(loc.name); return; }
+    if (emitted.has(prefix)) return;
+    emitted.add(prefix);
+    groupMembers.get(prefix).forEach((m) => add(m.name));
+  });
+  return names;
+}
+
 // タンク内の記録を薬品(substanceName)ごとにグループ化する
 function groupBySubstance(entries) {
   const map = new Map();
@@ -3444,38 +3523,8 @@ function SearchTab({ chemicals, onSelect, query, setQuery }) {
 /*  ホーム：場所タブ                                                    */
 /* ------------------------------------------------------------------ */
 
-function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, onAddLocation, onAddChemical }) {
-  const locations = useMemo(() => {
-    const map = new Map();
-    chemicals.forEach((c) => {
-      const key = locationMergeKey(c.location);
-      if (!map.has(key)) {
-        map.set(key, { ...c.location, name: canonicalLocationName(c.location.name), note: cleanLocationNote(c.location.note), items: [] });
-      }
-      map.get(key).items.push(c);
-    });
-    // まだ薬品が置かれていない、追加だけされた場所もここに合流させる
-    (extraLocations || []).forEach((l) => {
-      const key = locationMergeKey(l);
-      if (!map.has(key)) map.set(key, { id: l.id, name: canonicalLocationName(l.name), note: cleanLocationNote(l.note), items: [] });
-    });
-    // 場所メタ情報(extraLocations)にorderがあれば、薬品由来の場所にもマージする
-    const metaById = new Map((extraLocations || []).map((l) => [l.id, l]));
-    const list = Array.from(map.values()).map((loc) => ({
-      ...loc,
-      order: typeof metaById.get(loc.id)?.order === "number" ? metaById.get(loc.id).order : null,
-    }));
-    list.sort((a, b) => {
-      const ao = a.order === null ? Infinity : a.order;
-      const bo = b.order === null ? Infinity : b.order;
-      if (ao !== bo) return ao - bo;
-      const ra = locationSortRank(a.name);
-      const rb = locationSortRank(b.name);
-      if (ra !== rb) return ra - rb;
-      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
-    });
-    return list;
-  }, [chemicals, extraLocations]);
+function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, onAddLocation, onAddChemical, onSaveOrder }) {
+  const locations = useMemo(() => buildLocationList(chemicals, extraLocations), [chemicals, extraLocations]);
 
   // 「1-1」「1-2」...のように先頭の数字が同じ場所は、ひとつの「場所◯」カードにまとめる。
   // 元の並び順（order／ランク順）はグループの挿入位置にそのまま引き継ぐ。
@@ -3504,54 +3553,145 @@ function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, o
         name: prefix,
         note: `${subs.length}か所`,
         items: subs.flatMap((s) => s.items),
+        members: subs,
       });
     });
     return result;
   }, [locations]);
 
+  // 並べ替えモード：▲▼で入れ替えた結果は「完了」を押すまで手元(draftIds)にだけ持ち、
+  // 押した時に1回だけ保存する（読み書きを増やさないため）。
+  const [reordering, setReordering] = useState(false);
+  const [draftIds, setDraftIds] = useState(null);
+  const [savingOrder, setSavingOrder] = useState(false);
+
+  const orderedList = useMemo(() => {
+    if (!reordering || !draftIds) return displayList;
+    const byId = new Map(displayList.map((l) => [l.id, l]));
+    const arranged = draftIds.map((id) => byId.get(id)).filter(Boolean);
+    const placed = new Set(draftIds);
+    displayList.forEach((l) => { if (!placed.has(l.id)) arranged.push(l); }); // 並べ替え中に増えた項目は末尾へ
+    return arranged;
+  }, [displayList, reordering, draftIds]);
+
+  const startReorder = () => { setDraftIds(displayList.map((l) => l.id)); setReordering(true); };
+  const cancelReorder = () => { setReordering(false); setDraftIds(null); };
+  const moveItem = (index, delta) => {
+    const ids = orderedList.map((l) => l.id);
+    const j = index + delta;
+    if (j < 0 || j >= ids.length) return;
+    [ids[index], ids[j]] = [ids[j], ids[index]];
+    setDraftIds(ids);
+  };
+  const finishReorder = async () => {
+    if (savingOrder) return;
+    const changed = orderedList.length !== displayList.length || orderedList.some((l, i) => l.id !== displayList[i].id);
+    if (!changed) { cancelReorder(); return; }
+    setSavingOrder(true);
+    const ok = await onSaveOrder(orderedList);
+    setSavingOrder(false);
+    if (ok) cancelReorder();
+  };
+
+  const filledBtn = { border: "none", background: HEADER.bg, color: "#fff", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "7px 11px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 };
+  const outlineBtn = { border: `1.5px solid ${C.line}`, background: C.paper, color: C.ink, fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "6px 11px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 };
+  const arrowBtn = (disabled) => ({
+    width: 38, height: 38, borderRadius: 9, border: `1.5px solid ${C.line}`, background: C.paper, color: C.tealDeep,
+    display: "flex", alignItems: "center", justifyContent: "center", cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.35 : 1, padding: 0,
+  });
+
   return (
     <div style={{ padding: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
-        <SectionLabel>保管場所一覧</SectionLabel>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            onClick={onAddChemical}
-            style={{ border: "none", background: HEADER.bg, color: "#fff", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "7px 11px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}
-          >
-            <Plus size={13} /> 薬品を追加
-          </button>
-          <button
-            onClick={onAddLocation}
-            style={{ border: "none", background: HEADER.bg, color: "#fff", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "7px 11px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}
-          >
-            <Plus size={13} /> 場所を追加
-          </button>
-        </div>
-      </div>
+      {reordering ? (
+        <>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
+            <SectionLabel>並べ替え中</SectionLabel>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={cancelReorder} disabled={savingOrder} style={{ ...outlineBtn, opacity: savingOrder ? 0.5 : 1 }}>
+                キャンセル
+              </button>
+              <button onClick={finishReorder} disabled={savingOrder} style={{ ...filledBtn, opacity: savingOrder ? 0.6 : 1 }}>
+                <Check size={13} /> {savingOrder ? "保存中…" : "完了"}
+              </button>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8, background: C.okBg, border: `1px solid #C6D3E3`, borderRadius: 10, padding: "10px 13px", marginBottom: 12 }}>
+            <Info size={15} color={C.tealDeep} style={{ marginTop: 1, flexShrink: 0 }} />
+            <span style={{ fontSize: 12.5, color: C.tealDeep, lineHeight: 1.6 }}>
+              ▲▼で順番を入れ替えて、「完了」で保存します。「場所1」のようなまとまりは、中のサブロケーションごと一緒に動きます。
+            </span>
+          </div>
+        </>
+      ) : (
+        <>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
+            <SectionLabel>保管場所一覧</SectionLabel>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={onAddChemical} style={filledBtn}>
+                <Plus size={13} /> 薬品を追加
+              </button>
+              <button onClick={onAddLocation} style={filledBtn}>
+                <Plus size={13} /> 場所を追加
+              </button>
+            </div>
+          </div>
+          {displayList.length >= 2 && (
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+              <button onClick={startReorder} style={outlineBtn}>
+                <ArrowUpDown size={13} /> 並べ替え
+              </button>
+            </div>
+          )}
+        </>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {displayList.map((loc, index) => (
+        {orderedList.map((loc, index) => (
           <div
             key={loc.id}
             style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "13px 14px", display: "flex", alignItems: "center", gap: 10 }}
           >
-            <button
-              onClick={() => (loc.isGroup ? onOpenGroup(loc.name) : onOpenLocation(loc))}
-              style={{ textAlign: "left", border: "none", background: "transparent", padding: 0, display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: "pointer" }}
-            >
-              <div style={{ width: 34, height: 34, borderRadius: 9, background: C.okBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                {loc.isGroup ? <Package size={16} color={C.tealDeep} /> : <MapPin size={16} color={C.tealDeep} />}
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{loc.isGroup ? `場所${loc.name}` : displayLocationName(loc.name)}</div>
-                <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 2 }}>
-                  {loc.items.length}品目{loc.note ? `・${loc.note}` : ""}
+            {reordering ? (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
+                  <div style={{ width: 34, height: 34, borderRadius: 9, background: C.okBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    {loc.isGroup ? <Package size={16} color={C.tealDeep} /> : <MapPin size={16} color={C.tealDeep} />}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{loc.isGroup ? `場所${loc.name}` : displayLocationName(loc.name)}</div>
+                    <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 2 }}>
+                      {loc.items.length}品目{loc.note ? `・${loc.note}` : ""}
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <Chevron />
-            </button>
+                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  <button type="button" aria-label="上へ移動" onClick={() => moveItem(index, -1)} disabled={index === 0 || savingOrder} style={arrowBtn(index === 0 || savingOrder)}>
+                    <ArrowUp size={17} />
+                  </button>
+                  <button type="button" aria-label="下へ移動" onClick={() => moveItem(index, 1)} disabled={index === orderedList.length - 1 || savingOrder} style={arrowBtn(index === orderedList.length - 1 || savingOrder)}>
+                    <ArrowDown size={17} />
+                  </button>
+                </div>
+              </>
+            ) : (
+              <button
+                onClick={() => (loc.isGroup ? onOpenGroup(loc.name) : onOpenLocation(loc))}
+                style={{ textAlign: "left", border: "none", background: "transparent", padding: 0, display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: "pointer" }}
+              >
+                <div style={{ width: 34, height: 34, borderRadius: 9, background: C.okBg, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  {loc.isGroup ? <Package size={16} color={C.tealDeep} /> : <MapPin size={16} color={C.tealDeep} />}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{loc.isGroup ? `場所${loc.name}` : displayLocationName(loc.name)}</div>
+                  <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 2 }}>
+                    {loc.items.length}品目{loc.note ? `・${loc.note}` : ""}
+                  </div>
+                </div>
+                <Chevron />
+              </button>
+            )}
           </div>
         ))}
-        {displayList.length === 0 && (
+        {orderedList.length === 0 && (
           <div style={{ textAlign: "center", color: C.inkSoft, fontSize: 13, padding: "40px 0" }}>
             保管場所がまだありません
           </div>
@@ -3565,7 +3705,7 @@ function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, o
 /*  「場所1」などのグループページ：1-1〜1-6のような細かい場所の一覧          */
 /* ------------------------------------------------------------------ */
 
-function LocationGroupPage({ prefix, chemicals, extraLocations, onBack, onOpenLocation }) {
+function LocationGroupPage({ prefix, chemicals, extraLocations, onBack, onOpenLocation, onAddSubLocation }) {
   const locations = useMemo(() => {
     const map = new Map();
     chemicals.forEach((c) => {
@@ -3590,7 +3730,15 @@ function LocationGroupPage({ prefix, chemicals, extraLocations, onBack, onOpenLo
     <div>
       <TopBar title={`場所${prefix}の保管場所`} onBack={onBack} />
       <div style={{ padding: 16 }}>
-        <SectionLabel>サブロケーション一覧</SectionLabel>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
+          <SectionLabel>サブロケーション一覧</SectionLabel>
+          <button
+            onClick={onAddSubLocation}
+            style={{ border: "none", background: HEADER.bg, color: "#fff", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "7px 11px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}
+          >
+            <Plus size={13} /> サブロケーションを追加
+          </button>
+        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {locations.map((loc) => (
             <button
@@ -4340,11 +4488,11 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
 /*  薬品編集ページ（分子式・重量・廃液分類・備考を編集可能）                    */
 /* ------------------------------------------------------------------ */
 
-function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
+function ChemicalEditPage({ chemical, wasteCategories, locationOptions: locationOptionsProp, onBack, onSave }) {
   const [name, setName] = useState(chemical.name || "");
   const [formula, setFormula] = useState(chemical.formula || "");
   const [cas, setCas] = useState(chemical.cas || CAS_LOOKUP[chemical.name] || "");
-  const [locationName, setLocationName] = useState(chemical.location?.name || "");
+  const [locationName, setLocationName] = useState(canonicalLocationName(chemical.location?.name || ""));
   const [wasteId, setWasteId] = useState(chemical.wasteId || null);
   const [amount, setAmount] = useState(chemical.stock?.known === false ? "" : String(chemical.stock?.amount ?? ""));
   const [isFull, setIsFull] = useState(chemical.stock?.known === false && chemical.stock?.status === "full");
@@ -4378,7 +4526,8 @@ function ChemicalEditPage({ chemical, wasteCategories, onBack, onSave }) {
     boxSizing: "border-box",
   };
 
-  const locationOptions = LOCATION_OPTIONS.includes(locationName) ? LOCATION_OPTIONS : [locationName, ...LOCATION_OPTIONS];
+  const baseLocationOptions = locationOptionsProp && locationOptionsProp.length ? locationOptionsProp : LOCATION_OPTIONS;
+  const locationOptions = baseLocationOptions.includes(locationName) ? baseLocationOptions : [locationName, ...baseLocationOptions];
 
   const canSave = name.trim() !== "" && locationName !== "" && (isFull || (amount !== "" && !isNaN(parseFloat(amount))));
 
@@ -4749,7 +4898,8 @@ function AddLocationPage({ onBack, onSave }) {
         <div style={{ display: "flex", alignItems: "flex-start", gap: 8, background: C.okBg, border: `1px solid #C6D3E3`, borderRadius: 10, padding: "10px 13px", marginBottom: 20 }}>
           <Info size={15} color={C.tealDeep} style={{ marginTop: 1, flexShrink: 0 }} />
           <span style={{ fontSize: 12.5, color: C.tealDeep, lineHeight: 1.6 }}>
-            薬品がまだ無い保管場所（新しい棚・キャビネットなど）を先に登録できます。あとから「薬品を追加」する時にこの場所を選べます。
+            薬品がまだ無い保管場所（新しい棚・キャビネットなど）を先に登録できます。あとから「薬品を追加」「編集」する時にこの場所を選べます。
+            <br />「6-1」のように「数字-数字」で入力すると、「場所6」の中のサブロケーションとして表示されます。
           </span>
         </div>
 
@@ -4759,6 +4909,86 @@ function AddLocationPage({ onBack, onSave }) {
 
         <SectionLabel>保管場所名 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <input style={{ ...inputStyle, marginBottom: 16 }} value={name} onChange={(e) => setName(e.target.value)} placeholder="例：薬品庫B 棚3" />
+
+        <SectionLabel>場所の補足（任意）</SectionLabel>
+        <input style={{ ...inputStyle, marginBottom: 24 }} value={note} onChange={(e) => setNote(e.target.value)} placeholder="例：常温・可燃物キャビネット" />
+
+        <button
+          onClick={handleSave}
+          disabled={!canSave}
+          style={{ width: "100%", border: "none", background: canSave ? HEADER.bg : "#B7C0BC", color: "#fff", fontSize: 15, fontWeight: 600, borderRadius: 12, padding: "13px", cursor: canSave ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+        >
+          <Save size={16} /> 保存する
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  サブロケーション追加ページ（「場所1」などの中に 1-7 のような区画を足す）      */
+/* ------------------------------------------------------------------ */
+
+function AddSubLocationPage({ prefix, chemicals, extraLocations, onBack, onSave }) {
+  const existingNumbers = useMemo(
+    () => buildLocationList(chemicals, extraLocations)
+      .filter((l) => locationGroupPrefix(l.name) === prefix)
+      .map((l) => parseInt(canonicalLocationName(l.name).split("-")[1], 10)),
+    [chemicals, extraLocations, prefix]
+  );
+  const [num, setNum] = useState(() => String(Math.max(0, ...existingNumbers) + 1));
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const parsed = /^\d+$/.test(num) ? parseInt(num, 10) : NaN;
+  const valid = !isNaN(parsed) && parsed > 0;
+  const duplicate = valid && existingNumbers.includes(parsed);
+  const canSave = valid && !duplicate && !busy;
+
+  const inputStyle = {
+    width: "100%", border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "10px 13px",
+    fontSize: 14.5, color: C.ink, fontFamily: "'Inter', sans-serif", boxSizing: "border-box",
+  };
+
+  const handleSave = async () => {
+    if (!canSave) return;
+    setBusy(true);
+    try {
+      await onSave({ prefix, number: parsed, note: note.trim() });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <TopBar title="サブロケーションを追加" onBack={onBack} />
+      <div style={{ padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, background: C.okBg, border: `1px solid #C6D3E3`, borderRadius: 10, padding: "10px 13px", marginBottom: 20 }}>
+          <Info size={15} color={C.tealDeep} style={{ marginTop: 1, flexShrink: 0 }} />
+          <span style={{ fontSize: 12.5, color: C.tealDeep, lineHeight: 1.6 }}>
+            場所{prefix}の中に、新しい保管場所（棚・区画など）を追加します。追加後は「薬品を追加」「編集」の保管場所で選べます。
+          </span>
+        </div>
+
+        <div style={{ fontSize: 11.5, color: C.danger, marginBottom: 16 }}>
+          <span style={{ fontWeight: 700 }}>*</span> は必須項目です
+        </div>
+
+        <SectionLabel>番号 <span style={{ color: C.danger }}>*</span></SectionLabel>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <div style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 700, fontSize: 17, color: C.tealDeep }}>{prefix}-</div>
+          <input
+            style={{ ...inputStyle, flex: 1, fontFamily: "'Roboto Mono', monospace" }}
+            inputMode="numeric"
+            value={num}
+            onChange={(e) => setNum(e.target.value.replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)).replace(/[^0-9]/g, ""))}
+            placeholder="例：7"
+          />
+        </div>
+        <div style={{ fontSize: 11.5, color: duplicate ? C.danger : C.inkSoft, marginBottom: 16 }}>
+          {duplicate ? `「${prefix}-${parsed}」はすでに登録されています` : `追加される場所名：${prefix}-${valid ? parsed : "（番号を入力）"}`}
+        </div>
 
         <SectionLabel>場所の補足（任意）</SectionLabel>
         <input style={{ ...inputStyle, marginBottom: 24 }} value={note} onChange={(e) => setNote(e.target.value)} placeholder="例：常温・可燃物キャビネット" />
@@ -5595,12 +5825,13 @@ function RecordMassPage({ chemical, onBack, onSave }) {
 /*  薬品追加ページ                                                      */
 /* ------------------------------------------------------------------ */
 
-function AddChemicalPage({ chemicals, wasteCategories, onBack, onSave }) {
+function AddChemicalPage({ chemicals, wasteCategories, locationOptions, onBack, onSave }) {
   const [name, setName] = useState("");
   const [formula, setFormula] = useState("");
   const [cas, setCas] = useState("");
   const [casTouched, setCasTouched] = useState(false);
-  const [locationName, setLocationName] = useState(LOCATION_OPTIONS[0]);
+  const locationOptionList = locationOptions && locationOptions.length ? locationOptions : LOCATION_OPTIONS;
+  const [locationName, setLocationName] = useState(locationOptionList[0]);
   const [amount, setAmount] = useState("");
   const [isFull, setIsFull] = useState(false);
   const [purpose, setPurpose] = useState("");
@@ -5713,7 +5944,7 @@ function AddChemicalPage({ chemicals, wasteCategories, onBack, onSave }) {
 
         <SectionLabel>保管場所 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <select style={{ ...inputStyle, marginBottom: 10 }} value={locationName} onChange={(e) => setLocationName(e.target.value)}>
-          {LOCATION_OPTIONS.map((name) => (
+          {locationOptionList.map((name) => (
             <option key={name} value={name}>{displayLocationName(name)}</option>
           ))}
         </select>
@@ -6622,6 +6853,9 @@ const toggleTheme = () => {
     if (tab) setHomeTab(tab);
   };
 
+  // 薬品の追加・編集で選べる保管場所（「場所を追加」「サブロケーションを追加」した場所も含む）
+  const locationOptionNames = useMemo(() => buildLocationOptionNames(chemicals, locationsMeta), [chemicals, locationsMeta]);
+
   const handleSaveMass = async (chemId, remaining, note, personName) => {
     const chem = chemicals.find((c) => c.id === chemId);
     if (!chem) return;
@@ -6820,8 +7054,9 @@ const toggleTheme = () => {
 
   const resolveLocation = (rawName) => {
     const trimmedName = rawName.trim();
-    const existingFromChem = chemicals.find((c) => c.location.name.trim() === trimmedName)?.location;
-    const existingFromLoc = locationsMeta.find((l) => (l.name || "").trim() === trimmedName);
+    const canon = canonicalLocationName(trimmedName);
+    const existingFromChem = chemicals.find((c) => canonicalLocationName(c.location.name) === canon)?.location;
+    const existingFromLoc = locationsMeta.find((l) => canonicalLocationName(l.name) === canon);
     return (
       existingFromChem ||
       (existingFromLoc
@@ -6890,6 +7125,10 @@ const toggleTheme = () => {
   };
 
   const handleAddLocation = async ({ name, note }) => {
+    if (buildLocationList(chemicals, locationsMeta).some((l) => canonicalLocationName(l.name) === canonicalLocationName(name))) {
+      showToast(`「${name}」はすでに登録されています`, true);
+      return;
+    }
     const id = slugify(name);
     const maxOrder = Math.max(-1, ...locationsMeta.map((l) => (typeof l.order === "number" ? l.order : -1)));
     try{
@@ -6897,6 +7136,50 @@ const toggleTheme = () => {
       bumpSyncVersion(["locations"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
       goHome("location");
     }catch(e){ toastFail("場所の追加", e); }
+  };
+
+  // 「場所1」などのグループの中に、新しいサブロケーション（例：1-7）を追加する
+  const handleAddSubLocation = async ({ prefix, number, note }) => {
+    const name = `${prefix}-${number}`;
+    if (buildLocationList(chemicals, locationsMeta).some((l) => canonicalLocationName(l.name) === name)) {
+      showToast(`「${name}」はすでに登録されています`, true);
+      return;
+    }
+    // 場所一覧の中でグループの位置が動かないよう、すでにある区画の並び順を引き継ぐ
+    // （並び順がまだ誰にも設定されていなければ、従来どおりの既定順のまま）
+    const siblingOrders = locationsMeta
+      .filter((l) => locationGroupPrefix(l.name) === prefix && typeof l.order === "number")
+      .map((l) => l.order);
+    const data = { name, note: note || "" };
+    if (siblingOrders.length > 0) data.order = Math.min(...siblingOrders);
+    try{
+      await withDbTimeout(db.collection("locations").doc(slugify(name)).set(data), "addSubLocation-set-timeout");
+      bumpSyncVersion(["locations"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+      showToast(`「${name}」を追加しました`);
+      pop();
+    }catch(e){ toastFail("サブロケーションの追加", e); }
+  };
+
+  // 保管場所一覧の並び順を保存する。表示中の並び（先頭から順）をそのまま order として
+  // locations コレクションに書く。「場所1」のようなグループは、中の区画すべてに同じ order を付ける。
+  const handleSaveLocationOrder = async (orderedList) => {
+    const batch = db.batch();
+    orderedList.forEach((item, index) => {
+      const members = item.isGroup ? item.members : [item];
+      members.forEach((m) => {
+        if (!m.id) return;
+        batch.set(db.collection("locations").doc(m.id), { name: m.name, note: m.note || "", order: index }, { merge: true });
+      });
+    });
+    try{
+      await withDbTimeout(batch.commit(), "reorderLocations-commit-timeout");
+      bumpSyncVersion(["locations"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+      showToast("並び順を保存しました");
+      return true;
+    }catch(e){
+      toastFail("並び順の保存", e);
+      return false;
+    }
   };
 
   const handleDeleteChemical = async (chem) => {
@@ -7184,6 +7467,7 @@ const handleDeleteWasteCategories = (wastes) => {
                   onOpenGroup={(prefix) => push({ view: "locationGroup", prefix })}
                   onAddLocation={() => push({ view: "addLocation" })}
                   onAddChemical={() => push({ view: "addChemical" })}
+                  onSaveOrder={handleSaveLocationOrder}
                 />
               )}
               {homeTab === "inventory" && (
@@ -7230,6 +7514,7 @@ const handleDeleteWasteCategories = (wastes) => {
             <ChemicalEditPage
               chemical={findChem(current.id)}
               wasteCategories={wasteCategories}
+              locationOptions={locationOptionNames}
               onBack={pop}
               onSave={handleEditChemical}
             />
@@ -7258,6 +7543,7 @@ const handleDeleteWasteCategories = (wastes) => {
             extraLocations={locationsMeta}
             onBack={pop}
             onOpenLocation={(loc) => push({ view: "location", loc })}
+            onAddSubLocation={() => push({ view: "addSubLocation", prefix: current.prefix })}
           />
         )}
 
@@ -7334,11 +7620,21 @@ const handleDeleteWasteCategories = (wastes) => {
         )}
 
         {current.view === "addChemical" && (
-          <AddChemicalPage chemicals={chemicals} wasteCategories={wasteCategories} onBack={pop} onSave={handleAddChemical} />
+          <AddChemicalPage chemicals={chemicals} wasteCategories={wasteCategories} locationOptions={locationOptionNames} onBack={pop} onSave={handleAddChemical} />
         )}
 
         {current.view === "addLocation" && (
           <AddLocationPage onBack={pop} onSave={handleAddLocation} />
+        )}
+
+        {current.view === "addSubLocation" && (
+          <AddSubLocationPage
+            prefix={current.prefix}
+            chemicals={chemicals}
+            extraLocations={locationsMeta}
+            onBack={pop}
+            onSave={handleAddSubLocation}
+          />
         )}
 
         {current.view === "addWaste" && (
