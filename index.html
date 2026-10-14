@@ -132,7 +132,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='2.0.3.1';
+const CAESAR_APP_VERSION='2.0.4';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -7163,11 +7163,15 @@ const toggleTheme = () => {
   // 保管場所一覧の並び順を保存する。表示中の並び（先頭から順）をそのまま order として
   // locations コレクションに書く。「場所1」のようなグループは、中の区画すべてに同じ order を付ける。
   const handleSaveLocationOrder = async (orderedList) => {
-    const batch = db.batch();
+    // 初回の並べ替えは全場所ぶんの書き込みになり、通常操作用のABUSE GUARD(5秒で書き込み20件)に
+    // 引っかかるため、ユーザーが明示的に行う一括保存としてbulk扱いにする。
+    // あわせて、並び順が変わらない場所は書き込まない。
+    const batch = db.batch({ bulk: true });
     orderedList.forEach((item, index) => {
       const members = item.isGroup ? item.members : [item];
       members.forEach((m) => {
         if (!m.id) return;
+        if (m.order === index) return;
         batch.set(db.collection("locations").doc(m.id), { name: m.name, note: m.note || "", order: index }, { merge: true });
       });
     });
