@@ -132,7 +132,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='2.0.4';
+const CAESAR_APP_VERSION='2.0.5';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -6306,11 +6306,12 @@ function RestoreBackupPreviewPage({ backupId, onBack, onRestore }) {
 /*  管理者メニュー（Excel出力・復元・使用記録の消去をまとめる）                */
 /* ------------------------------------------------------------------ */
 
-function AdminMenuPage({ onBack, onExport, onOpenRestore, onOpenDelete }) {
+function AdminMenuPage({ onBack, onExport, onOpenRestore, onOpenDelete, onOpenDeleteLocation }) {
   const items = [
     { icon: Download, label: "薬品一覧をExcelで書き出す", onClick: onExport },
     { icon: RotateCcw, label: "バックアップから復元する", onClick: onOpenRestore },
     { icon: Trash2, label: "使用記録を消去する", onClick: onOpenDelete },
+    { icon: Trash2, label: "保管場所を削除する", onClick: onOpenDeleteLocation },
   ];
   return (
     <div>
@@ -6327,6 +6328,63 @@ function AdminMenuPage({ onBack, onExport, onOpenRestore, onOpenDelete }) {
             <Chevron />
           </button>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  保管場所の削除（管理者専用・薬品が無い場所のみ）                          */
+/* ------------------------------------------------------------------ */
+
+function LocationDeletePage({ chemicals, extraLocations, onBack, onDelete }) {
+  const [busyKey, setBusyKey] = useState(null);
+  const list = useMemo(() => {
+    const names = buildLocationOptionNames(chemicals, extraLocations);
+    const byName = new Map(buildLocationList(chemicals, extraLocations).map((l) => [canonicalLocationName(l.name), l]));
+    // 登録済みの場所だけを対象にする（既定の選択肢のうち未登録のものは削除対象外）
+    return names.map((n) => byName.get(n)).filter(Boolean);
+  }, [chemicals, extraLocations]);
+
+  return (
+    <div>
+      <TopBar title="保管場所を削除" onBack={onBack} />
+      <div style={{ padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, background: C.okBg, border: `1px solid #C6D3E3`, borderRadius: 10, padding: "10px 13px", marginBottom: 16 }}>
+          <Info size={15} color={C.tealDeep} style={{ marginTop: 1, flexShrink: 0 }} />
+          <span style={{ fontSize: 12.5, color: C.tealDeep, lineHeight: 1.6 }}>
+            薬品が1つも置かれていない場所だけ削除できます。薬品がある場所は、先に薬品の保管場所を変更してください。
+          </span>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {list.map((loc) => {
+            const count = loc.items.length;
+            const key = canonicalLocationName(loc.name);
+            return (
+              <div key={loc.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{displayLocationName(loc.name)}</div>
+                  <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 2 }}>
+                    {count > 0 ? `${count}品目あり（削除できません）` : `薬品なし${loc.note ? `・${loc.note}` : ""}`}
+                  </div>
+                </div>
+                <button
+                  disabled={count > 0 || busyKey !== null}
+                  onClick={async () => {
+                    setBusyKey(key);
+                    try { await onDelete(loc); } finally { setBusyKey(null); }
+                  }}
+                  style={{ border: "none", background: count > 0 ? "#B7C0BC" : C.danger, color: "#fff", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "7px 11px", cursor: count > 0 ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 4, opacity: busyKey === key ? 0.6 : 1 }}
+                >
+                  <Trash2 size={13} /> 削除
+                </button>
+              </div>
+            );
+          })}
+          {list.length === 0 && (
+            <div style={{ textAlign: "center", color: C.inkSoft, fontSize: 13, padding: "40px 0" }}>削除できる保管場所がありません</div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -7160,6 +7218,25 @@ const toggleTheme = () => {
     }catch(e){ toastFail("サブロケーションの追加", e); }
   };
 
+  // 保管場所の削除（管理者メニューから。薬品が置かれていない場所だけ）
+  const handleDeleteLocation = async (loc) => {
+    const canon = canonicalLocationName(loc.name);
+    if (chemicals.some((c) => canonicalLocationName(c.location.name) === canon)) {
+      showToast("薬品が置かれている場所は削除できません", true);
+      return;
+    }
+    if (!(await caesarConfirm(`保管場所「${displayLocationName(loc.name)}」を削除しますか？`))) return;
+    const targets = locationsMeta.filter((l) => canonicalLocationName(l.name) === canon);
+    if (targets.length === 0) return;
+    try{
+      const batch = db.batch();
+      targets.forEach((l) => batch.delete(db.collection("locations").doc(l.id)));
+      await withDbTimeout(batch.commit(), "deleteLocation-commit-timeout");
+      bumpSyncVersion(["locations"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+      showToast(`「${displayLocationName(loc.name)}」を削除しました`);
+    }catch(e){ toastFail("保管場所の削除", e); }
+  };
+
   // 保管場所一覧の並び順を保存する。表示中の並び（先頭から順）をそのまま order として
   // locations コレクションに書く。「場所1」のようなグループは、中の区画すべてに同じ order を付ける。
   const handleSaveLocationOrder = async (orderedList) => {
@@ -7666,7 +7743,12 @@ const handleDeleteWasteCategories = (wastes) => {
             onExport={() => { handleExportExcel(); pop(); }}
             onOpenRestore={() => push({ view: "restoreList" })}
             onOpenDelete={() => push({ view: "deleteUsageEntries" })}
+            onOpenDeleteLocation={() => push({ view: "deleteLocation" })}
           />
+        )}
+
+        {current.view === "deleteLocation" && (
+          <LocationDeletePage chemicals={chemicals} extraLocations={locationsMeta} onBack={pop} onDelete={handleDeleteLocation} />
         )}
 
         {current.view === "deleteUsageEntries" && (
