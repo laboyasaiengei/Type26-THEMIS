@@ -132,7 +132,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='2.0.6';
+const CAESAR_APP_VERSION='2.0.7';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -220,6 +220,7 @@ function Plus(props) { return (<IconBase {...props}><line x1="12" y1="5" x2="12"
 function ArrowUp(props) { return (<IconBase {...props}><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></IconBase>); }
 function ArrowDown(props) { return (<IconBase {...props}><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></IconBase>); }
 function ArrowUpDown(props) { return (<IconBase {...props}><polyline points="7 15 12 20 17 15"/><polyline points="7 9 12 4 17 9"/></IconBase>); }
+function MoreHorizontal(props) { return (<IconBase {...props}><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></IconBase>); }
 function Pencil(props) { return (<IconBase {...props}><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></IconBase>); }
 function Check(props) { return (<IconBase {...props}><polyline points="20 6 9 17 4 12"/></IconBase>); }
 function Calculator(props) { return (<IconBase {...props}><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="10" x2="8" y2="10"/><line x1="12" y1="10" x2="12" y2="10"/><line x1="16" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="8" y2="14"/><line x1="12" y1="14" x2="12" y2="14"/><line x1="16" y1="14" x2="16" y2="14"/><line x1="8" y1="18" x2="8" y2="18"/><line x1="12" y1="18" x2="12" y2="18"/><line x1="16" y1="18" x2="16" y2="18"/></IconBase>); }
@@ -3564,6 +3565,7 @@ function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, o
   const [reordering, setReordering] = useState(false);
   const [draftIds, setDraftIds] = useState(null);
   const [savingOrder, setSavingOrder] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const orderedList = useMemo(() => {
     if (!reordering || !draftIds) return displayList;
@@ -3626,27 +3628,38 @@ function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, o
         <>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
             <SectionLabel>保管場所一覧</SectionLabel>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ display: "flex", gap: 8, position: "relative" }}>
               <button onClick={onAddChemical} style={filledBtn}>
-                <Plus size={13} /> 薬品を追加
+                <Plus size={13} /> 薬品追加
               </button>
               <button onClick={onAddLocation} style={filledBtn}>
-                <Plus size={13} /> 場所を追加
+                <Plus size={13} /> 場所追加
               </button>
+              <button type="button" aria-label="その他の操作" onClick={() => setMenuOpen((v) => !v)} style={{ ...outlineBtn, padding: "6px 8px" }}>
+                <MoreHorizontal size={16} />
+              </button>
+              {menuOpen && (
+                <>
+                  <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 21, background: "#fff", border: `1px solid ${C.line}`, borderRadius: 12, boxShadow: "0 6px 20px rgba(0,0,0,0.15)", padding: 6, minWidth: 190 }}>
+                    {[
+                      { icon: Plus, label: "薬品を一括追加", onClick: onBulkAddChemicals, show: true },
+                      { icon: Pencil, label: "薬品を一括編集", onClick: onBulkEditChemicals, show: true },
+                      { icon: ArrowUpDown, label: "並べ替え", onClick: startReorder, show: displayList.length >= 2 },
+                    ].filter((m) => m.show).map(({ icon: Icon, label, onClick }) => (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() => { setMenuOpen(false); onClick(); }}
+                        style={{ width: "100%", textAlign: "left", border: "none", background: "transparent", padding: "11px 12px", borderRadius: 8, cursor: "pointer", display: "flex", alignItems: "center", gap: 10, fontSize: 14, fontWeight: 600, color: C.ink }}
+                      >
+                        <Icon size={15} color={C.tealDeep} /> {label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
-            <button onClick={onBulkAddChemicals} style={outlineBtn}>
-              <Plus size={13} /> 薬品を一括追加
-            </button>
-            <button onClick={onBulkEditChemicals} style={outlineBtn}>
-              <Pencil size={13} /> 薬品を一括編集
-            </button>
-            {displayList.length >= 2 && (
-              <button onClick={startReorder} style={outlineBtn}>
-                <ArrowUpDown size={13} /> 並べ替え
-              </button>
-            )}
           </div>
         </>
       )}
