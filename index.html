@@ -132,7 +132,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='2.0.5';
+const CAESAR_APP_VERSION='2.0.6';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -3523,7 +3523,7 @@ function SearchTab({ chemicals, onSelect, query, setQuery }) {
 /*  ホーム：場所タブ                                                    */
 /* ------------------------------------------------------------------ */
 
-function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, onAddLocation, onAddChemical, onSaveOrder }) {
+function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, onAddLocation, onAddChemical, onSaveOrder, onBulkAddChemicals, onBulkEditChemicals }) {
   const locations = useMemo(() => buildLocationList(chemicals, extraLocations), [chemicals, extraLocations]);
 
   // 「1-1」「1-2」...のように先頭の数字が同じ場所は、ひとつの「場所◯」カードにまとめる。
@@ -3635,13 +3635,19 @@ function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, o
               </button>
             </div>
           </div>
-          {displayList.length >= 2 && (
-            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+            <button onClick={onBulkAddChemicals} style={outlineBtn}>
+              <Plus size={13} /> 薬品を一括追加
+            </button>
+            <button onClick={onBulkEditChemicals} style={outlineBtn}>
+              <Pencil size={13} /> 薬品を一括編集
+            </button>
+            {displayList.length >= 2 && (
               <button onClick={startReorder} style={outlineBtn}>
                 <ArrowUpDown size={13} /> 並べ替え
               </button>
-            </div>
-          )}
+            )}
+          </div>
         </>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -6311,7 +6317,7 @@ function AdminMenuPage({ onBack, onExport, onOpenRestore, onOpenDelete, onOpenDe
     { icon: Download, label: "薬品一覧をExcelで書き出す", onClick: onExport },
     { icon: RotateCcw, label: "バックアップから復元する", onClick: onOpenRestore },
     { icon: Trash2, label: "使用記録を消去する", onClick: onOpenDelete },
-    { icon: Trash2, label: "保管場所を削除する", onClick: onOpenDeleteLocation },
+    { icon: Trash2, label: "保管場所を管理する（一括追加・編集・削除）", onClick: onOpenDeleteLocation },
   ];
   return (
     <div>
@@ -6334,10 +6340,437 @@ function AdminMenuPage({ onBack, onExport, onOpenRestore, onOpenDelete, onOpenDe
 }
 
 /* ------------------------------------------------------------------ */
+/*  薬品の一括追加（新品をまとめて登録／同じ薬品は「複製」で増やす）            */
+/* ------------------------------------------------------------------ */
+
+function BulkAddChemicalsPage({ chemicals, locationOptions, onBack, onSave }) {
+  const options = locationOptions && locationOptions.length ? locationOptions : LOCATION_OPTIONS;
+  const rid = () => Math.random().toString(36).slice(2);
+  // 新品をまとめて入れる使い方が中心なので、在庫量は「FULL（未開封）」を初期値にする
+  const newRow = (loc) => ({ key: rid(), name: "", locationName: loc, isFull: true, amount: "" });
+  const [rows, setRows] = useState(() => [newRow(options[0])]);
+  const [busy, setBusy] = useState(false);
+
+  const nameList = useMemo(
+    () => Array.from(new Set(chemicals.map((c) => (c.name || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "ja")),
+    [chemicals]
+  );
+
+  const update = (key, patch) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  const addRow = () => setRows((rs) => [...rs, newRow(rs.length ? rs[rs.length - 1].locationName : options[0])]);
+  const duplicateRow = (key) => setRows((rs) => {
+    const i = rs.findIndex((r) => r.key === key);
+    if (i < 0) return rs;
+    return [...rs.slice(0, i + 1), { ...rs[i], key: rid() }, ...rs.slice(i + 1)];
+  });
+  const removeRow = (key) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [newRow(options[0])]));
+
+  const amountOk = (r) => r.isFull || (r.amount !== "" && !isNaN(parseFloat(r.amount)));
+  const filled = rows.filter((r) => r.name.trim() !== "");
+  const invalidCount = filled.filter((r) => !amountOk(r)).length;
+  const canSave = filled.length > 0 && invalidCount === 0 && !busy;
+
+  const inputStyle = {
+    width: "100%", border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "10px 13px",
+    fontSize: 14.5, color: C.ink, fontFamily: "'Inter', sans-serif", boxSizing: "border-box",
+  };
+  const segBtn = (active) => ({
+    flex: 1, textAlign: "center", border: `1.5px solid ${active ? C.tealDeep : C.line}`, background: active ? "#fff" : C.paper,
+    color: active ? C.tealDeep : C.inkSoft, borderRadius: 10, padding: "9px 10px", fontSize: 13, fontWeight: 600, cursor: "pointer",
+  });
+  const smallBtn = { border: `1.5px solid ${C.line}`, background: C.paper, color: C.ink, fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "5px 10px", cursor: "pointer" };
+
+  const handleSave = async () => {
+    if (!canSave) return;
+    setBusy(true);
+    try {
+      await onSave(filled.map((r) => ({ name: r.name.trim(), locationName: r.locationName, isFull: r.isFull, amount: r.isFull ? null : parseFloat(r.amount) })));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <TopBar title="薬品を一括追加" onBack={onBack} />
+      <div style={{ padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, background: C.okBg, border: `1px solid #C6D3E3`, borderRadius: 10, padding: "10px 13px", marginBottom: 16 }}>
+          <Info size={15} color={C.tealDeep} style={{ marginTop: 1, flexShrink: 0 }} />
+          <span style={{ fontSize: 12.5, color: C.tealDeep, lineHeight: 1.6 }}>
+            薬品名と保管場所、在庫量を入れて、まとめて登録します。同じ薬品が複数本あるときは「複製」で増やせます。CASナンバーとリスクアセスメント対象は、登録済みの同名薬品から自動で引き継ぎます。名前が空の行は無視します。
+          </span>
+        </div>
+        <datalist id="bulk-chem-names">
+          {nameList.map((n) => <option key={n} value={n} />)}
+        </datalist>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {rows.map((r, idx) => (
+            <div key={r.key} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: C.inkSoft }}>{idx + 1}件目</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button type="button" onClick={() => duplicateRow(r.key)} style={smallBtn}>複製</button>
+                  <button type="button" onClick={() => removeRow(r.key)} style={{ ...smallBtn, color: C.danger }}>削除</button>
+                </div>
+              </div>
+              <input
+                list="bulk-chem-names"
+                style={{ ...inputStyle, marginBottom: 8 }}
+                value={r.name}
+                onChange={(e) => update(r.key, { name: e.target.value })}
+                placeholder="薬品名　例：メタノール"
+              />
+              <select style={{ ...inputStyle, marginBottom: 8 }} value={r.locationName} onChange={(e) => update(r.key, { locationName: e.target.value })}>
+                {options.map((n) => <option key={n} value={n}>{displayLocationName(n)}</option>)}
+              </select>
+              <div style={{ display: "flex", gap: 8, marginBottom: r.isFull ? 0 : 8 }}>
+                <button type="button" onClick={() => update(r.key, { isFull: true })} style={segBtn(r.isFull)}>FULL（未開封）</button>
+                <button type="button" onClick={() => update(r.key, { isFull: false })} style={segBtn(!r.isFull)}>重量を記入</button>
+              </div>
+              {!r.isFull && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input
+                    style={{ ...inputStyle, flex: 1, fontFamily: "'Roboto Mono', monospace" }}
+                    inputMode="decimal"
+                    value={r.amount}
+                    onChange={(e) => update(r.key, { amount: e.target.value })}
+                    placeholder="残量"
+                  />
+                  <span style={{ fontSize: 13, color: C.inkSoft }}>g</span>
+                </div>
+              )}
+              {r.name.trim() !== "" && !amountOk(r) && (
+                <div style={{ fontSize: 11.5, color: C.danger, marginTop: 6 }}>重量を入力するか、FULL（未開封）を選んでください</div>
+              )}
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={addRow}
+          style={{ width: "100%", marginTop: 12, border: `1.5px dashed ${C.line}`, background: "transparent", color: C.tealDeep, fontSize: 13.5, fontWeight: 700, borderRadius: 12, padding: "11px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+        >
+          <Plus size={15} /> 行を追加
+        </button>
+        <button
+          onClick={handleSave}
+          disabled={!canSave}
+          style={{ width: "100%", marginTop: 16, border: "none", background: canSave ? HEADER.bg : "#B7C0BC", color: "#fff", fontSize: 15, fontWeight: 600, borderRadius: 12, padding: "13px", cursor: canSave ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+        >
+          <Save size={16} /> {busy ? "保存中…" : `${filled.length}件を追加する`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  薬品の一括編集（選んだ薬品を1画面でまとめて修正）                          */
+/* ------------------------------------------------------------------ */
+
+function BulkEditChemicalsPage({ chemicals, wasteCategories, locationOptions, onBack, onSave }) {
+  const options = locationOptions && locationOptions.length ? locationOptions : LOCATION_OPTIONS;
+  const [step, setStep] = useState("select");
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(() => new Set());
+  const [drafts, setDrafts] = useState({});
+  const [wasteApply, setWasteApply] = useState(false);
+  const [wasteId, setWasteId] = useState(null);
+  const [riskApply, setRiskApply] = useState(false);
+  const [risk, setRisk] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const sorted = useMemo(
+    () => [...chemicals].sort((a, b) => (a.name || "").localeCompare(b.name || "", "ja")),
+    [chemicals]
+  );
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return sorted;
+    return sorted.filter((c) =>
+      [c.name, c.formula, c.cas, displayLocationName(c.location?.name || "")].some((v) => (v || "").toLowerCase().includes(q))
+    );
+  }, [sorted, query]);
+  const SHOW_LIMIT = 200;
+  const shown = filtered.slice(0, SHOW_LIMIT);
+
+  const toggle = (id) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const selectShown = () => setSelected((prev) => { const next = new Set(prev); shown.forEach((c) => next.add(c.id)); return next; });
+  const clearSelection = () => setSelected(new Set());
+
+  const selectedList = useMemo(() => sorted.filter((c) => selected.has(c.id)), [sorted, selected]);
+
+  const startEdit = () => {
+    const d = {};
+    selectedList.forEach((c) => {
+      const isFull0 = c.stock?.known === false && c.stock?.status === "full";
+      const amount0 = c.stock?.known === false ? "" : String(c.stock?.amount ?? "");
+      d[c.id] = {
+        name: c.name || "", formula: c.formula || "", cas: c.cas || "", purpose: c.purpose || "",
+        locationName: canonicalLocationName(c.location?.name || ""),
+        isFull: isFull0, amount: amount0, isFull0, amount0,
+      };
+    });
+    setDrafts(d);
+    setStep("edit");
+  };
+  const upd = (id, patch) => setDrafts((ds) => ({ ...ds, [id]: { ...ds[id], ...patch } }));
+  const setAllLocations = (name) => {
+    if (!name) return;
+    setDrafts((ds) => {
+      const next = {};
+      Object.keys(ds).forEach((id) => { next[id] = { ...ds[id], locationName: name }; });
+      return next;
+    });
+  };
+
+  const activeWastes = useMemo(() => [...wasteCategories].filter((w) => !w.disposed).sort(compareWasteCode), [wasteCategories]);
+
+  // 元の内容と比べて、変わった項目だけを書き込み対象にする
+  const { items, invalid } = useMemo(() => {
+    if (step !== "edit") return { items: [], invalid: 0 };
+    let invalid = 0;
+    const items = [];
+    selectedList.forEach((c) => {
+      const d = drafts[c.id];
+      if (!d) return;
+      const patch = {};
+      if (d.name.trim() === "") invalid += 1;
+      else if (d.name.trim() !== (c.name || "")) patch.name = d.name.trim();
+      if (d.formula.trim() !== (c.formula || "")) patch.formula = d.formula.trim();
+      if (d.cas.trim() !== (c.cas || "")) patch.cas = d.cas.trim();
+      if (d.locationName !== canonicalLocationName(c.location?.name || "")) patch.locationName = d.locationName;
+      if (d.purpose.trim() !== (c.purpose || "")) patch.purpose = d.purpose.trim();
+      const stockChanged = d.isFull !== d.isFull0 || (!d.isFull && d.amount !== d.amount0);
+      if (stockChanged) {
+        if (!d.isFull && (d.amount === "" || isNaN(parseFloat(d.amount)))) invalid += 1;
+        else {
+          patch.stock = d.isFull
+            ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
+            : { amount: Math.max(0, parseFloat(d.amount)), capacity: 0, unit: "g", known: true };
+          // 「FULL」から「重量を記入」に変えた＝開封したので、開封日が空なら今日の日付を入れる
+          if (d.isFull0 && !d.isFull && !c.openDate) patch.openDate = todayDateStr();
+        }
+      }
+      if (wasteApply && (c.wasteId || null) !== wasteId) patch.wasteId = wasteId;
+      if (riskApply && !!c.riskAssessment !== risk) patch.riskAssessment = risk;
+      if (Object.keys(patch).length > 0) items.push({ chem: c, patch });
+    });
+    return { items, invalid };
+  }, [step, selectedList, drafts, wasteApply, wasteId, riskApply, risk]);
+
+  const canSave = items.length > 0 && invalid === 0 && !busy;
+  const changedIds = new Set(items.map((x) => x.chem.id));
+
+  const handleSave = async () => {
+    if (!canSave) return;
+    setBusy(true);
+    try { await onSave(items); } finally { setBusy(false); }
+  };
+
+  const inputStyle = {
+    width: "100%", border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "10px 13px",
+    fontSize: 14.5, color: C.ink, fontFamily: "'Inter', sans-serif", boxSizing: "border-box",
+  };
+  const segBtn = (active) => ({
+    flex: 1, textAlign: "center", border: `1.5px solid ${active ? C.tealDeep : C.line}`, background: active ? "#fff" : C.paper,
+    color: active ? C.tealDeep : C.inkSoft, borderRadius: 10, padding: "9px 10px", fontSize: 13, fontWeight: 600, cursor: "pointer",
+  });
+  const smallBtn = { border: `1.5px solid ${C.line}`, background: C.paper, color: C.ink, fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "6px 11px", cursor: "pointer" };
+  const barBtn = (enabled) => ({ width: "100%", border: "none", background: enabled ? HEADER.bg : "#B7C0BC", color: "#fff", fontSize: 15, fontWeight: 600, borderRadius: 12, padding: "13px", cursor: enabled ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 });
+  const stickyBar = { position: "sticky", bottom: 0, background: "#fff", borderTop: `1px solid ${C.line}`, padding: 12 };
+
+  if (step === "select") {
+    return (
+      <div>
+        <TopBar title="薬品を一括編集" onBack={onBack} />
+        <div style={{ padding: 16 }}>
+          <input style={{ ...inputStyle, marginBottom: 10 }} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="薬品名・分子式・CAS・保管場所で絞り込み" />
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12.5, color: C.inkSoft }}>{selected.size}件を選択中（表示 {shown.length}/{filtered.length}件）</div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button type="button" onClick={selectShown} style={smallBtn}>表示中をすべて選択</button>
+              <button type="button" onClick={clearSelection} style={smallBtn}>選択解除</button>
+            </div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {shown.map((c) => {
+              const on = selected.has(c.id);
+              return (
+                <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 12, background: on ? "#fff" : C.paper, border: `1.5px solid ${on ? C.tealDeep : C.line}`, borderRadius: 12, padding: "11px 13px", cursor: "pointer" }}>
+                  <input type="checkbox" checked={on} onChange={() => toggle(c.id)} style={{ width: 20, height: 20, flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{c.name}</div>
+                    <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 2 }}>
+                      {displayLocationName(c.location?.name || "")}{c.formula ? `・${c.formula}` : ""}
+                    </div>
+                  </div>
+                </label>
+              );
+            })}
+            {filtered.length === 0 && <div style={{ textAlign: "center", color: C.inkSoft, fontSize: 13, padding: "40px 0" }}>該当する薬品がありません</div>}
+            {filtered.length > SHOW_LIMIT && <div style={{ textAlign: "center", color: C.inkSoft, fontSize: 12, padding: "8px 0" }}>先頭{SHOW_LIMIT}件を表示しています。絞り込みで探してください</div>}
+          </div>
+        </div>
+        <div style={stickyBar}>
+          <button onClick={startEdit} disabled={selected.size === 0} style={barBtn(selected.size > 0)}>
+            <Pencil size={16} /> 選んだ{selected.size}件を編集する
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <TopBar title={`${selectedList.length}件を一括編集`} onBack={() => setStep("select")} />
+      <div style={{ padding: 16 }}>
+        <div style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: 12, marginBottom: 14 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: C.inkSoft, marginBottom: 10 }}>まとめて変更（選んだ全件に反映）</div>
+          <SectionLabel>保管場所</SectionLabel>
+          <select style={{ ...inputStyle, marginBottom: 12 }} value="" onChange={(e) => setAllLocations(e.target.value)}>
+            <option value="">選ぶと全件の保管場所を変更…</option>
+            {options.map((n) => <option key={n} value={n}>{displayLocationName(n)}</option>)}
+          </select>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, fontWeight: 600, color: C.ink, marginBottom: 6 }}>
+            <input type="checkbox" checked={wasteApply} onChange={(e) => setWasteApply(e.target.checked)} style={{ width: 18, height: 18 }} /> 廃液分類を変更する
+          </label>
+          {wasteApply && (
+            <select style={{ ...inputStyle, marginBottom: 10 }} value={wasteId || ""} onChange={(e) => setWasteId(e.target.value || null)}>
+              <option value="">未設定</option>
+              {activeWastes.map((w) => <option key={w.id} value={w.id}>{w.code} {w.name}</option>)}
+            </select>
+          )}
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, fontWeight: 600, color: C.ink, marginTop: 6, marginBottom: 6 }}>
+            <input type="checkbox" checked={riskApply} onChange={(e) => setRiskApply(e.target.checked)} style={{ width: 18, height: 18 }} /> リスクアセスメント対象を変更する
+          </label>
+          {riskApply && (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" onClick={() => setRisk(true)} style={segBtn(risk)}>対象薬品</button>
+              <button type="button" onClick={() => setRisk(false)} style={segBtn(!risk)}>対象外</button>
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {selectedList.map((c) => {
+            const d = drafts[c.id];
+            if (!d) return null;
+            const locOpts = options.includes(d.locationName) ? options : [d.locationName, ...options];
+            return (
+              <div key={c.id} style={{ background: C.paper, border: `1.5px solid ${changedIds.has(c.id) ? C.tealDeep : C.line}`, borderRadius: 12, padding: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                  <div style={{ fontSize: 12, color: C.inkSoft }}>{c.name}</div>
+                  {changedIds.has(c.id) && <div style={{ fontSize: 11, fontWeight: 700, color: C.tealDeep }}>変更あり</div>}
+                </div>
+                <input style={{ ...inputStyle, marginBottom: 8 }} value={d.name} onChange={(e) => upd(c.id, { name: e.target.value })} placeholder="薬品名" />
+                <input style={{ ...inputStyle, marginBottom: 8, fontFamily: "'Roboto Mono', monospace" }} value={d.formula} onChange={(e) => upd(c.id, { formula: e.target.value })} placeholder="分子式（任意）" />
+                <input style={{ ...inputStyle, marginBottom: 8, fontFamily: "'Roboto Mono', monospace" }} value={d.cas} onChange={(e) => upd(c.id, { cas: e.target.value })} placeholder="CASナンバー（任意）" />
+                <select style={{ ...inputStyle, marginBottom: 8 }} value={d.locationName} onChange={(e) => upd(c.id, { locationName: e.target.value })}>
+                  {locOpts.map((n) => <option key={n} value={n}>{displayLocationName(n)}</option>)}
+                </select>
+                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                  <button type="button" onClick={() => upd(c.id, { isFull: true })} style={segBtn(d.isFull)}>FULL（未開封）</button>
+                  <button type="button" onClick={() => upd(c.id, { isFull: false })} style={segBtn(!d.isFull)}>重量を記入</button>
+                </div>
+                {!d.isFull && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <input style={{ ...inputStyle, flex: 1, fontFamily: "'Roboto Mono', monospace" }} inputMode="decimal" value={d.amount} onChange={(e) => upd(c.id, { amount: e.target.value })} placeholder="残量" />
+                    <span style={{ fontSize: 13, color: C.inkSoft }}>g</span>
+                  </div>
+                )}
+                <input style={inputStyle} value={d.purpose} onChange={(e) => upd(c.id, { purpose: e.target.value })} placeholder="備考（任意）" />
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div style={stickyBar}>
+        {invalid > 0 && <div style={{ fontSize: 11.5, color: C.danger, marginBottom: 6, textAlign: "center" }}>薬品名が空、または重量が未入力の薬品があります</div>}
+        <button onClick={handleSave} disabled={!canSave} style={barBtn(canSave)}>
+          <Save size={16} /> {busy ? "保存中…" : items.length === 0 ? "変更はありません" : `${items.length}件の変更を保存`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  保管場所の一括追加（1行に1か所。「名前,補足」で補足も入力できる）          */
+/* ------------------------------------------------------------------ */
+
+function BulkAddLocationPage({ chemicals, extraLocations, onBack, onSave }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const { entries, duplicates } = useMemo(() => {
+    const existing = new Set(buildLocationList(chemicals, extraLocations).map((l) => canonicalLocationName(l.name)));
+    const seen = new Set();
+    const entries = [];
+    let duplicates = 0;
+    text.split(/\r?\n/).forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      const parts = trimmed.split(/[,，\t]/);
+      const name = parts[0].trim();
+      if (!name) return;
+      const canon = canonicalLocationName(name);
+      if (existing.has(canon) || seen.has(canon)) { duplicates += 1; return; }
+      seen.add(canon);
+      entries.push({ name, note: parts.slice(1).join(",").trim() });
+    });
+    return { entries, duplicates };
+  }, [text, chemicals, extraLocations]);
+
+  const canSave = entries.length > 0 && !busy;
+  const handleSave = async () => {
+    if (!canSave) return;
+    setBusy(true);
+    try { await onSave(entries); } finally { setBusy(false); }
+  };
+
+  return (
+    <div>
+      <TopBar title="保管場所を一括追加" onBack={onBack} />
+      <div style={{ padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, background: C.okBg, border: `1px solid #C6D3E3`, borderRadius: 10, padding: "10px 13px", marginBottom: 16 }}>
+          <Info size={15} color={C.tealDeep} style={{ marginTop: 1, flexShrink: 0 }} />
+          <span style={{ fontSize: 12.5, color: C.tealDeep, lineHeight: 1.6 }}>
+            1行に1か所ずつ入力してください。「薬品庫B 棚1,常温」のようにカンマで区切ると補足も入れられます。「6-1」「6-2」のように「数字-数字」で入力すると「場所6」のサブロケーションになります。すでにある名前は自動でスキップします。
+          </span>
+        </div>
+        <SectionLabel>追加する場所</SectionLabel>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={10}
+          placeholder={"薬品庫B 棚1\n薬品庫B 棚2,常温\n6-1\n6-2"}
+          style={{ width: "100%", border: `1.5px solid ${C.line}`, borderRadius: 10, padding: "10px 13px", fontSize: 14.5, color: C.ink, fontFamily: "'Inter', sans-serif", boxSizing: "border-box", marginBottom: 8, resize: "vertical" }}
+        />
+        <div style={{ fontSize: 12, color: C.inkSoft, marginBottom: 20 }}>
+          追加される場所：{entries.length}件{duplicates > 0 ? `（登録済み・重複の${duplicates}件はスキップ）` : ""}
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={!canSave}
+          style={{ width: "100%", border: "none", background: canSave ? HEADER.bg : "#B7C0BC", color: "#fff", fontSize: 15, fontWeight: 600, borderRadius: 12, padding: "13px", cursor: canSave ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+        >
+          <Save size={16} /> {busy ? "保存中…" : `${entries.length}件を追加する`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  保管場所の削除（管理者専用・薬品が無い場所のみ）                          */
 /* ------------------------------------------------------------------ */
 
-function LocationDeletePage({ chemicals, extraLocations, onBack, onDelete }) {
+function LocationDeletePage({ chemicals, extraLocations, onBack, onDelete, onEdit, onBulkAdd }) {
   const [busyKey, setBusyKey] = useState(null);
   const list = useMemo(() => {
     const names = buildLocationOptionNames(chemicals, extraLocations);
@@ -6348,14 +6781,20 @@ function LocationDeletePage({ chemicals, extraLocations, onBack, onDelete }) {
 
   return (
     <div>
-      <TopBar title="保管場所を削除" onBack={onBack} />
+      <TopBar title="保管場所の管理" onBack={onBack} />
       <div style={{ padding: 16 }}>
         <div style={{ display: "flex", alignItems: "flex-start", gap: 8, background: C.okBg, border: `1px solid #C6D3E3`, borderRadius: 10, padding: "10px 13px", marginBottom: 16 }}>
           <Info size={15} color={C.tealDeep} style={{ marginTop: 1, flexShrink: 0 }} />
           <span style={{ fontSize: 12.5, color: C.tealDeep, lineHeight: 1.6 }}>
-            薬品が1つも置かれていない場所だけ削除できます。薬品がある場所は、先に薬品の保管場所を変更してください。
+            名前・補足の編集はどの場所でもできます。削除できるのは、薬品が1つも置かれていない場所だけです。
           </span>
         </div>
+        <button
+          onClick={onBulkAdd}
+          style={{ width: "100%", border: "none", background: HEADER.bg, color: "#fff", fontSize: 13.5, fontWeight: 600, borderRadius: 10, padding: "11px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginBottom: 16 }}
+        >
+          <Plus size={15} /> 場所を一括追加
+        </button>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {list.map((loc) => {
             const count = loc.items.length;
@@ -6368,6 +6807,13 @@ function LocationDeletePage({ chemicals, extraLocations, onBack, onDelete }) {
                     {count > 0 ? `${count}品目あり（削除できません）` : `薬品なし${loc.note ? `・${loc.note}` : ""}`}
                   </div>
                 </div>
+                <button
+                  disabled={busyKey !== null}
+                  onClick={() => onEdit(loc)}
+                  style={{ border: `1.5px solid ${C.line}`, background: C.paper, color: C.ink, fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "6px 11px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}
+                >
+                  <Pencil size={13} /> 編集
+                </button>
                 <button
                   disabled={count > 0 || busyKey !== null}
                   onClick={async () => {
@@ -7161,6 +7607,11 @@ const toggleTheme = () => {
     // 表記ゆれ（「冷蔵庫１」「冷蔵庫 1」等）で分かれている薬品・場所も、
     // 正規化した名前が一致するものはまとめて同じ内容で保存する
     const canonName = canonicalLocationName(location.name);
+    if (canonicalLocationName(name) !== canonName
+      && buildLocationList(chemicals, locationsMeta).some((l) => canonicalLocationName(l.name) === canonicalLocationName(name))) {
+      showToast(`「${name}」はすでに登録されています`, true);
+      return;
+    }
     const targetChemicals = chemicals.filter((c) => canonicalLocationName(c.location.name) === canonName);
     const batch = db.batch();
     const touchedLocationIds = new Set([location.id]);
@@ -7216,6 +7667,77 @@ const toggleTheme = () => {
       showToast(`「${name}」を追加しました`);
       pop();
     }catch(e){ toastFail("サブロケーションの追加", e); }
+  };
+
+  // 薬品の一括追加。CAS・リスクアセスメント対象は、単体追加と同じく登録済みの同名薬品から引き継ぐ
+  const handleBulkAddChemicals = async (rows) => {
+    const locCache = new Map();
+    const getLoc = (raw) => {
+      const key = canonicalLocationName(raw.trim());
+      if (!locCache.has(key)) locCache.set(key, resolveLocation(raw)); // 未登録の場所は同じidで揃える
+      return locCache.get(key);
+    };
+    const base = Date.now();
+    try{
+      const batch = db.batch({ bulk: true });
+      rows.forEach((r, i) => {
+        const matched = chemicals.find((c) => c.name && c.name.trim().toLowerCase() === r.name.toLowerCase());
+        const stock = r.isFull
+          ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
+          : { amount: r.amount, capacity: 0, unit: "g", known: true };
+        batch.set(db.collection("chemicals").doc(`c_${base}_${i}`), {
+          name: r.name, formula: "", cas: matched?.cas || CAS_LOOKUP[r.name] || "",
+          location: getLoc(r.locationName), subLocation: "", stock, purpose: "", wasteId: null,
+          openDate: r.isFull ? "" : todayDateStr(), riskAssessment: !!matched?.riskAssessment,
+        });
+      });
+      await withDbTimeout(batch.commit(), "bulkAddChemicals-commit-timeout");
+      bumpSyncVersion(["chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+      showToast(`${rows.length}件の薬品を追加しました`);
+      pop();
+    }catch(e){ toastFail("薬品の一括追加", e); }
+  };
+
+  // 薬品の一括編集。画面側で「変わった項目だけ」を渡してくるので、そのまま更新する
+  const handleBulkEditChemicals = async (items) => {
+    if (!items.length) return;
+    const locCache = new Map();
+    const getLoc = (raw) => {
+      const key = canonicalLocationName(raw.trim());
+      if (!locCache.has(key)) locCache.set(key, resolveLocation(raw));
+      return locCache.get(key);
+    };
+    try{
+      const batch = db.batch({ bulk: true });
+      items.forEach(({ chem, patch }) => {
+        const { locationName, ...rest } = patch;
+        const updates = { ...rest };
+        if (locationName !== undefined) updates.location = getLoc(locationName);
+        batch.update(db.collection("chemicals").doc(chem.id), updates);
+      });
+      await withDbTimeout(batch.commit(), "bulkEditChemicals-commit-timeout");
+      bumpSyncVersion(["chemicals"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+      showToast(`${items.length}件の薬品を更新しました`);
+      pop();
+    }catch(e){ toastFail("薬品の一括編集", e); }
+  };
+
+  // 保管場所の一括追加（管理者メニューから）。重複はスキップし、並び順は末尾に続けて付ける
+  const handleBulkAddLocations = async (entries) => {
+    const existing = new Set(buildLocationList(chemicals, locationsMeta).map((l) => canonicalLocationName(l.name)));
+    const fresh = entries.filter((e) => !existing.has(canonicalLocationName(e.name)));
+    if (fresh.length === 0) { showToast("追加できる場所がありません", true); return; }
+    let order = Math.max(-1, ...locationsMeta.map((l) => (typeof l.order === "number" ? l.order : -1))) + 1;
+    try{
+      const batch = db.batch({ bulk: true });
+      fresh.forEach((e) => {
+        batch.set(db.collection("locations").doc(slugify(e.name)), { name: e.name, note: e.note || "", order: order++ });
+      });
+      await withDbTimeout(batch.commit(), "bulkAddLocations-commit-timeout");
+      bumpSyncVersion(["locations"]).catch((err) => console.warn("syncVersion更新に失敗:", err));
+      showToast(`${fresh.length}件の場所を追加しました`);
+      pop();
+    }catch(e){ toastFail("場所の一括追加", e); }
   };
 
   // 保管場所の削除（管理者メニューから。薬品が置かれていない場所だけ）
@@ -7549,6 +8071,8 @@ const handleDeleteWasteCategories = (wastes) => {
                   onAddLocation={() => push({ view: "addLocation" })}
                   onAddChemical={() => push({ view: "addChemical" })}
                   onSaveOrder={handleSaveLocationOrder}
+                  onBulkAddChemicals={() => push({ view: "bulkAddChemicals" })}
+                  onBulkEditChemicals={() => push({ view: "bulkEditChemicals" })}
                 />
               )}
               {homeTab === "inventory" && (
@@ -7747,8 +8271,27 @@ const handleDeleteWasteCategories = (wastes) => {
           />
         )}
 
+        {current.view === "bulkAddChemicals" && (
+          <BulkAddChemicalsPage chemicals={chemicals} locationOptions={locationOptionNames} onBack={pop} onSave={handleBulkAddChemicals} />
+        )}
+
+        {current.view === "bulkEditChemicals" && (
+          <BulkEditChemicalsPage chemicals={chemicals} wasteCategories={wasteCategories} locationOptions={locationOptionNames} onBack={pop} onSave={handleBulkEditChemicals} />
+        )}
+
+        {current.view === "bulkAddLocation" && (
+          <BulkAddLocationPage chemicals={chemicals} extraLocations={locationsMeta} onBack={pop} onSave={handleBulkAddLocations} />
+        )}
+
         {current.view === "deleteLocation" && (
-          <LocationDeletePage chemicals={chemicals} extraLocations={locationsMeta} onBack={pop} onDelete={handleDeleteLocation} />
+          <LocationDeletePage
+            chemicals={chemicals}
+            extraLocations={locationsMeta}
+            onBack={pop}
+            onDelete={handleDeleteLocation}
+            onEdit={(loc) => push({ view: "editLocation", loc })}
+            onBulkAdd={() => push({ view: "bulkAddLocation" })}
+          />
         )}
 
         {current.view === "deleteUsageEntries" && (
