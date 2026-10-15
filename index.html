@@ -132,7 +132,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='2.0.7';
+const CAESAR_APP_VERSION='2.0.8';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -3641,7 +3641,7 @@ function LocationTab({ chemicals, extraLocations, onOpenLocation, onOpenGroup, o
               {menuOpen && (
                 <>
                   <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
-                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 21, background: "#fff", border: `1px solid ${C.line}`, borderRadius: 12, boxShadow: "0 6px 20px rgba(0,0,0,0.15)", padding: 6, minWidth: 190 }}>
+                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 21, background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, boxShadow: "0 6px 20px rgba(0,0,0,0.15)", padding: 6, minWidth: 190 }}>
                     {[
                       { icon: Plus, label: "薬品を一括追加", onClick: onBulkAddChemicals, show: true },
                       { icon: Pencil, label: "薬品を一括編集", onClick: onBulkEditChemicals, show: true },
@@ -6595,7 +6595,7 @@ function BulkEditChemicalsPage({ chemicals, wasteCategories, locationOptions, on
   });
   const smallBtn = { border: `1.5px solid ${C.line}`, background: C.paper, color: C.ink, fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "6px 11px", cursor: "pointer" };
   const barBtn = (enabled) => ({ width: "100%", border: "none", background: enabled ? HEADER.bg : "#B7C0BC", color: "#fff", fontSize: 15, fontWeight: 600, borderRadius: 12, padding: "13px", cursor: enabled ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 });
-  const stickyBar = { position: "sticky", bottom: 0, background: "#fff", borderTop: `1px solid ${C.line}`, padding: 12 };
+  const stickyBar = { position: "sticky", bottom: 0, background: C.paper, borderTop: `1px solid ${C.line}`, padding: 12 };
 
   if (step === "select") {
     return (
@@ -6614,7 +6614,7 @@ function BulkEditChemicalsPage({ chemicals, wasteCategories, locationOptions, on
             {shown.map((c) => {
               const on = selected.has(c.id);
               return (
-                <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 12, background: on ? "#fff" : C.paper, border: `1.5px solid ${on ? C.tealDeep : C.line}`, borderRadius: 12, padding: "11px 13px", cursor: "pointer" }}>
+                <label key={c.id} style={{ display: "flex", alignItems: "center", gap: 12, background: on ? C.okBg : C.paper, border: `1.5px solid ${on ? C.tealDeep : C.line}`, borderRadius: 12, padding: "11px 13px", cursor: "pointer" }}>
                   <input type="checkbox" checked={on} onChange={() => toggle(c.id)} style={{ width: 20, height: 20, flexShrink: 0 }} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14.5, color: C.ink }}>{c.name}</div>
