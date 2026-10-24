@@ -132,7 +132,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='2.0.8';
+const CAESAR_APP_VERSION='2.1';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -1096,10 +1096,49 @@ async function caesarGetAppCheckToken(){
   return token;
 }
 
+/* ---- 管理者セッション（メモリのみ。localStorageには保存しない） ---- */
+const CAESAR_ADMIN_WINDOW_MS = 10 * 60 * 1000;
+let caesarAdminIdToken = "";
+let caesarAdminExpiresAt = 0;
+
+function caesarAdminIsActive(){
+  if(!caesarAdminIdToken) return false;
+  if(Date.now() >= caesarAdminExpiresAt){
+    caesarAdminLogout();
+    return false;
+  }
+  return true;
+}
+function caesarAdminLogout(){
+  caesarAdminIdToken = "";
+  caesarAdminExpiresAt = 0;
+}
+async function caesarAdminLogin(email, password){
+  const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(firebaseConfig.apiKey)}`, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({email, password, returnSecureToken:true}),
+    cache:"no-store"
+  });
+  if(!res.ok) throw new Error("ADMIN_LOGIN_FAILED");
+  const data = await res.json();
+  if(!data.idToken) throw new Error("ADMIN_LOGIN_FAILED");
+  const tokenLife = (Number(data.expiresIn) || 3600) * 1000 - 60000;
+  caesarAdminIdToken = data.idToken;
+  caesarAdminExpiresAt = Date.now() + Math.min(CAESAR_ADMIN_WINDOW_MS, tokenLife);
+  return true;
+}
+
 async function caesarRestHeaders(){
-  if(!caesarRestIdToken || Date.now() >= caesarRestIdTokenExpiresAt) await caesarRestAuthRequest();
+  let token;
+  if(caesarAdminIsActive()){
+    token = caesarAdminIdToken;
+  }else{
+    if(!caesarRestIdToken || Date.now() >= caesarRestIdTokenExpiresAt) await caesarRestAuthRequest();
+    token = caesarRestIdToken;
+  }
   const headers = {
-    "Authorization": "Bearer " + caesarRestIdToken,
+    "Authorization": "Bearer " + token,
     "Content-Type": "application/json"
   };
   const appCheck = await caesarGetAppCheckToken();
@@ -2667,11 +2706,6 @@ async function restoreFromBackup(backupId) {
   await copyDocsInto(entriesSnap.docs, db.collection("wasteEntries"));
   await copyDocsInto(locSnap.docs, db.collection("locations"));
 
-  const settings = backupDoc.data().settings;
-  if (settings && settings.passcode) {
-    await withDbTimeout(db.collection("meta").doc("settings").set({ passcode: settings.passcode }, { merge: true }), "restore-passcode-set-timeout");
-  }
-
   // 復元は通常の書き込みハンドラを経由しないため、明示的にsyncVersionを進めておく。
   // （これをしないと、この端末や他端末が「変更なし」と誤判定してキャッシュを使い続けてしまう）
   await bumpSyncVersion(["chemicals", "wasteCategories", "wasteEntries", "locations"]).catch((e) =>
@@ -3109,59 +3143,96 @@ function NumericKeypad({ onDigit, onBackspace, disabled }) {
   );
 }
 
-function PasscodeModal({ title, message, onCancel, onSubmit, correctPasscode }) {
-  const [value, setValue] = useState("");
+function PasscodeModal({ title, message, onCancel, onSubmit }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const [shake, setShake] = useState(false);
-  const maxLen = 8;
+  const [busy, setBusy] = useState(false);
 
-  const triggerShake = (msg) => {
-    setError(msg);
-    setShake(true);
-    setTimeout(() => {
-      setShake(false);
-      setValue("");
-    }, 350);
-  };
+  // 管理者としてログイン中(10分以内)なら、入力を求めずそのまま進める
+  const alreadyAdmin = caesarAdminIsActive();
+  useEffect(() => {
+    if (alreadyAdmin) onSubmit();
+  }, []);
+  if (alreadyAdmin) return null;
 
-  const handleDigit = (d) => {
-    if (value.length >= maxLen) return;
-    const next = value + d;
-    setValue(next);
+  const handleLogin = async () => {
+    if (busy) return;
+    if (!email.trim() || !password) {
+      setError("メールアドレスとパスワードを入力してください。");
+      return;
+    }
+    setBusy(true);
     setError("");
-    if (next.length >= (correctPasscode || "").length) {
-      if (next === correctPasscode) {
-        onSubmit();
-      } else {
-        triggerShake("パスコードが違います。");
-      }
+    try {
+      await caesarAdminLogin(email.trim(), password);
+      setPassword("");
+      onSubmit();
+    } catch (e) {
+      setPassword("");
+      setError("ログインに失敗しました。入力内容を確認してください。");
+      setBusy(false);
     }
   };
 
-  const handleBackspace = () => {
-    setValue((v) => v.slice(0, -1));
-    setError("");
+  const inputStyle = {
+    width: "100%",
+    boxSizing: "border-box",
+    border: `1.5px solid ${C.line}`,
+    borderRadius: 10,
+    padding: "11px 12px",
+    fontSize: 16,
+    color: C.ink,
+    background: C.paper,
+    marginTop: 10,
   };
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(24,37,36,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20 }}>
-      <div style={{ background: C.paper, borderRadius: 16, padding: "20px 20px 26px", width: "100%", maxWidth: 340 }}>
+      <div style={{ background: C.paper, borderRadius: 16, padding: "20px 20px 22px", width: "100%", maxWidth: 340 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
           <Lock size={16} color={C.tealDeep} />
           <div style={{ fontWeight: 700, fontSize: 15, color: C.ink }}>{title}</div>
         </div>
-        <div style={{ fontSize: 13, color: C.inkSoft, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{message}</div>
+        <div style={{ fontSize: 13, color: C.inkSoft, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+          {String(message || "").replace(/パスコードを入力してください/g, "管理者ログインしてください")}
+        </div>
+        <div style={{ fontSize: 12, color: C.inkSoft, marginTop: 10 }}>
+          管理者アカウントでログインしてください（10分間有効）
+        </div>
 
-        <PinDots length={value.length} minSlots={Math.max(4, (correctPasscode || "").length)} shake={shake} />
-        <div style={{ minHeight: 16, textAlign: "center", marginBottom: 10 }}>
+        <input
+          type="email"
+          autoComplete="username"
+          placeholder="メールアドレス"
+          value={email}
+          onChange={(e) => { setEmail(e.target.value); setError(""); }}
+          style={inputStyle}
+        />
+        <input
+          type="password"
+          autoComplete="current-password"
+          placeholder="パスワード"
+          value={password}
+          onChange={(e) => { setPassword(e.target.value); setError(""); }}
+          onKeyDown={(e) => { if (e.key === "Enter") handleLogin(); }}
+          style={inputStyle}
+        />
+
+        <div style={{ minHeight: 18, marginTop: 8 }}>
           {error && <span style={{ fontSize: 12, color: C.danger }}>{error}</span>}
         </div>
 
-        <NumericKeypad onDigit={handleDigit} onBackspace={handleBackspace} />
-
+        <button
+          onClick={handleLogin}
+          disabled={busy}
+          style={{ width: "100%", marginTop: 6, border: "none", background: C.tealDeep, color: "#fff", fontSize: 14.5, fontWeight: 600, borderRadius: 10, padding: "12px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+        >
+          {busy ? "確認中…" : "ログイン"}
+        </button>
         <button
           onClick={onCancel}
-          style={{ width: "100%", marginTop: 20, border: `1px solid ${C.line}`, background: "transparent", color: C.inkSoft, fontSize: 14, fontWeight: 600, borderRadius: 10, padding: "11px", cursor: "pointer" }}
+          style={{ width: "100%", marginTop: 10, border: `1px solid ${C.line}`, background: "transparent", color: C.inkSoft, fontSize: 14, fontWeight: 600, borderRadius: 10, padding: "11px", cursor: "pointer" }}
         >
           キャンセル
         </button>
@@ -3904,6 +3975,14 @@ function WasteTab({ wasteCategories, onOpenWaste, onOpenCalc, onOpenArchive, onA
     () => wasteCategories.filter((w) => !w.disposed).sort(compareWasteCode),
     [wasteCategories]
   );
+
+  // 管理者ログイン中かどうか（ログイン直後・10分経過・ログアウトに追従する）
+  const [adminOn, setAdminOn] = useState(caesarAdminIsActive());
+  useEffect(() => {
+    const t = setInterval(() => setAdminOn(caesarAdminIsActive()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
   return (
     <div style={{ padding: 16 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8, flexWrap: "wrap", gap: 6 }}>
@@ -3927,12 +4006,17 @@ function WasteTab({ wasteCategories, onOpenWaste, onOpenCalc, onOpenArchive, onA
           >
             <Calculator size={13} /> g/L計算ツール
           </button>
-          <button
-            onClick={onChangePasscode}
-            style={{ border: `1.5px solid ${C.line}`, background: C.paper, color: C.ink, fontSize: 11.5, fontWeight: 700, borderRadius: 8, padding: "6px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}
-          >
-            <Lock size={13} /> パスコード変更
-          </button>
+          {adminOn && (
+            <button
+              onClick={() => {
+                onChangePasscode();
+                setAdminOn(caesarAdminIsActive());
+              }}
+              style={{ border: `1.5px solid ${C.line}`, background: C.paper, color: C.ink, fontSize: 11.5, fontWeight: 700, borderRadius: 8, padding: "6px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}
+            >
+              <Lock size={13} /> 管理者ログアウト
+            </button>
+          )}
         </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -5324,10 +5408,10 @@ function WasteEntryAddPage({ waste, lockedSubstanceName, onBack, onSave }) {
     boxSizing: "border-box",
   };
 
-  const handleOpenConfirm = () => {
-    if (!canSave) return;
-    setConfirming(true);
-  };
+  const handleOpenChangePasscode = () => {
+  caesarAdminLogout();
+  showToast("管理者ログアウトしました", false);
+};
 
   const handleConfirmSave = () => {
     if (!canSave) return;
