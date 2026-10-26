@@ -1113,6 +1113,34 @@ function caesarAdminLogout(){
   caesarAdminIdToken = "";
   caesarAdminExpiresAt = 0;
 }
+const CAESAR_LOGIN_FAIL_KEY = "caesarAdminLoginFail.v1";
+const CAESAR_LOGIN_FAIL_LIMIT = 3;
+const CAESAR_LOGIN_FAIL_WINDOW_MS = 15 * 60 * 1000;
+
+function caesarAdminLoginReport(detail){
+  try{
+    if(typeof window.__sentinelReport === "function"){
+      window.__sentinelReport("admin-login-failed", "Admin Login", 0, detail);        // 本線
+    }else if(typeof caesarDiagLogRecord === "function"){
+      caesarDiagLogRecord("admin-login-failed", "Admin Login", null, detail);         // Dev
+    }
+  }catch(e){}
+}
+function caesarAdminLoginNoteFailure(code){
+  let st = { n: 0, firstAt: 0 };
+  try{ st = JSON.parse(localStorage.getItem(CAESAR_LOGIN_FAIL_KEY) || "") || st; }catch(e){}
+  const now = Date.now();
+  if(!st.firstAt || now - st.firstAt > CAESAR_LOGIN_FAIL_WINDOW_MS) st = { n: 0, firstAt: now };
+  st.n++;
+  try{ localStorage.setItem(CAESAR_LOGIN_FAIL_KEY, JSON.stringify(st)); }catch(e){}
+  if(st.n >= CAESAR_LOGIN_FAIL_LIMIT || code === "TOO_MANY_ATTEMPTS_TRY_LATER"){
+    caesarAdminLoginReport("fails=" + st.n + " " + code);
+  }
+}
+function caesarAdminLoginClearFailures(){
+  try{ localStorage.removeItem(CAESAR_LOGIN_FAIL_KEY); }catch(e){}
+}
+
 async function caesarAdminLogin(email, password){
   const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(firebaseConfig.apiKey)}`, {
     method:"POST",
@@ -1120,9 +1148,18 @@ async function caesarAdminLogin(email, password){
     body:JSON.stringify({email, password, returnSecureToken:true}),
     cache:"no-store"
   });
-  if(!res.ok) throw new Error("ADMIN_LOGIN_FAILED");
+  if(!res.ok){
+    let code = "";
+    try{
+      const j = await res.json();
+      code = String((j && j.error && j.error.message) || "").split(/[\s:]/)[0].replace(/[^A-Z_]/g, "").slice(0, 40);
+    }catch(e){}
+    caesarAdminLoginNoteFailure(code || ("HTTP_" + res.status));
+    throw new Error("ADMIN_LOGIN_FAILED");
+  }
   const data = await res.json();
   if(!data.idToken) throw new Error("ADMIN_LOGIN_FAILED");
+  caesarAdminLoginClearFailures();
   const tokenLife = (Number(data.expiresIn) || 3600) * 1000 - 60000;
   caesarAdminIdToken = data.idToken;
   caesarAdminExpiresAt = Date.now() + Math.min(CAESAR_ADMIN_WINDOW_MS, tokenLife);
