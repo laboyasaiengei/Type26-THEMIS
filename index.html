@@ -139,8 +139,9 @@ const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
 function load(k,d){try{const x=JSON.parse(localStorage.getItem(k)||"");return x||d}catch(_){return d}} function save(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(_){}}
 function allowed(){const now=Date.now(),a=load(RK,[]).filter(t=>now-t<600000);if(a.length>=10)return false;a.push(now);save(RK,a);return true}
 function put(category,location,status,detail){const now=Date.now(),key=[category,location,status||0].join("|");if(now-(recent.get(key)||0)<600000||!allowed())return;recent.set(key,now);const q=load(QK,[]);q.push({time:new Date(now).toISOString(),appId:APP,appVersion:VER,online:navigator.onLine!==false,category:clean(category,60),location:clean(location,80),detail:clean(detail,160),httpStatus:Number(status)||0});save(QK,q.slice(-50));setTimeout(flush,0)}
+window.__sentinelReport=put;
 function loc(u){u=String(u||"");if(u.includes("firestore.googleapis.com"))return "Firestore REST";if(u.includes("securetoken.googleapis.com"))return "Firebase Token";if(u.includes("identitytoolkit.googleapis.com"))return "Firebase Auth";if(u.includes("firebaseappcheck.googleapis.com")||u.includes("recaptchaenterprise.googleapis.com"))return "App Check";return "Firebase/Google API"}
-function watch(u){u=String(u||"");return /(?:firestore|securetoken|identitytoolkit|firebaseappcheck|recaptchaenterprise)\.googleapis\.com/.test(u)&&!u.includes("sentinelDiagnostics")}
+function watch(u){u=String(u||"");return /(?:firestore|securetoken|identitytoolkit|firebaseappcheck|recaptchaenterprise)\.googleapis\.com/.test(u)&&!u.includes("sentinelDiagnostics")&&!u.includes("accounts:signInWithPassword")}
 /* Firestore RESTのnetwork-errorだけは特別扱いする:
    1) 単発失敗では通報しない
    2) 一度だけ即時再試行する
@@ -1186,14 +1187,6 @@ async function caesarAdminLogin(email, password){
   if(!data.idToken) throw new Error("ADMIN_LOGIN_FAILED");
   caesarAdminLoginClearFailures();
   caesarAdminAudit({ event: "login-ok", account: data.email || email, uid: data.localId });
-  const tokenLife = (Number(data.expiresIn) || 3600) * 1000 - 60000;
-  caesarAdminIdToken = data.idToken;
-  caesarAdminExpiresAt = Date.now() + Math.min(CAESAR_ADMIN_WINDOW_MS, tokenLife);
-  return true;
-}
-  const data = await res.json();
-  if(!data.idToken) throw new Error("ADMIN_LOGIN_FAILED");
-  caesarAdminLoginClearFailures();
   const tokenLife = (Number(data.expiresIn) || 3600) * 1000 - 60000;
   caesarAdminIdToken = data.idToken;
   caesarAdminExpiresAt = Date.now() + Math.min(CAESAR_ADMIN_WINDOW_MS, tokenLife);
