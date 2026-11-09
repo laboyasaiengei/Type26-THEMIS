@@ -132,7 +132,7 @@ html[data-theme="dark"], html[data-theme="dark"] body { background: #12181A; }
 <script>
 /* SENTINEL Central Diagnostic v0.2 — production automatic reporting; no user-entered data */
 (function(){
-const CAESAR_APP_VERSION='2.1.1';
+const CAESAR_APP_VERSION='2.1.2';
 const APP='caesar-prod', VER=CAESAR_APP_VERSION, CFG={apiKey:"AIzaSyCZOI7sTRGn2xw6VWPkXblb8KW4TM_BcwU",authDomain:"dev-caesar.firebaseapp.com",projectId:"dev-caesar",storageBucket:"dev-caesar.firebasestorage.app",messagingSenderId:"339298618142",appId:"1:339298618142:web:69e5af56d4fb66840f170f"}, SITE="6LffvagtAAAAAMYORF3VlYDdUBemsfqunrxkArCo";
 const QK="sentinelDiagQueue.v0.2."+APP,RK="sentinelDiagRate.v0.2."+APP,origFetch=window.fetch.bind(window),recent=new Map();let app,auth,check,busy=false;
 const clean=(v,n)=>String(v==null?"":v).replace(/[\r\n\t]+/g," ").slice(0,n);
@@ -2881,6 +2881,32 @@ function autoStatus(stock) {
   return "in_use";
 }
 
+// ---- 場所2の在庫管理（重量を測らず「未開封／使用中」の2択） ----
+// 在庫は { known: false, status: "full" | "in_use" } で保存する（未開封は従来のFULLと同じ形式）。
+function isSimpleStockLocationName(name) {
+  const n = canonicalLocationName(name || "");
+  return n === "2" || n === "場所2";
+}
+
+function isSimpleStockChemical(chem) {
+  return isSimpleStockLocationName(chem && chem.location ? chem.location.name : "");
+}
+
+// 重量なしで「未開封」または「使用中」だけ登録されている在庫かどうか
+function isStatusOnlyStock(stock) {
+  return !!stock && stock.known === false && (stock.status === "full" || stock.status === "in_use");
+}
+
+// 在庫量が「未登録」扱いかどうか（在庫タブの未登録一覧用）。
+// 重量なし（known===false）のうち、未開封（FULL）は登録済み。「使用中」は場所2の薬品だけ登録済みとみなす。
+function isStockUnregistered(chem) {
+  const s = chem && chem.stock;
+  if (!s || s.known !== false) return false;
+  if (s.status === "full") return false;
+  if (s.status === "in_use" && isSimpleStockChemical(chem)) return false;
+  return true;
+}
+
 // 在庫量の少ない順に並べるためのソート用の値。
 // 重量が未登録（known===false）のものは値が分からないので、常に一番下に回す。
 function stockSortValue(stock) {
@@ -2891,7 +2917,9 @@ function stockSortValue(stock) {
 // 検索・場所案内などで在庫量（g）を1行で表示するための文字列。
 function stockAmountLabel(stock) {
   const status = autoStatus(stock);
-  return stock && stock.known !== false ? `${stock.amount} g` : STATUS_META[status].sub;
+  if (stock && stock.known !== false) return `${stock.amount} g`;
+  if (status === "in_use") return "使用中";
+  return STATUS_META[status].sub;
 }
 
 // 保管場所が「場所未設定」など、まだきちんと登録されていないかどうか。
@@ -3933,11 +3961,11 @@ function InventoryTab({ chemicals, onEdit, onDelete }) {
 
   // 在庫量（重量）または保管場所のどちらかが未登録の薬品を対象にする。
   // ただし「FULL（未開封）」は重量こそ未計測だが状態としては登録済み（既知）なので、
-  // known===false であっても status が "full" の場合はここでの「未登録」には含めない。
+  // ここでの「未登録」には含めない。場所2の「使用中」も同様に登録済みとして扱う（isStockUnregistered）。
   const unregistered = useMemo(
     () =>
       chemicals
-        .filter((c) => (c.stock?.known === false && c.stock?.status !== "full") || isLocationUnregistered(c.location))
+        .filter((c) => isStockUnregistered(c) || isLocationUnregistered(c.location))
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
     [chemicals]
   );
@@ -3969,7 +3997,7 @@ function InventoryTab({ chemicals, onEdit, onDelete }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {pageItems.map((c) => {
           const status = autoStatus(c.stock);
-          const stockKnown = c.stock?.known !== false || c.stock?.status === "full";
+          const stockKnown = !isStockUnregistered(c);
           const locationUnregistered = isLocationUnregistered(c.location);
           return (
             <div key={c.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px" }}>
@@ -4439,6 +4467,11 @@ function WasteArchivePage({ wasteCategories, onBack, onOpenWaste, onDeleteWastes
 function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpenWaste, onRecord, onDelete, onRecordWaste }) {
   const status = autoStatus(chemical.stock);
   const stockKnown = !!chemical.stock && chemical.stock.known !== false;
+  // 場所2は重量を測らず「未開封／使用中」で管理し、使用量(g)だけを記録する。
+  // 重量が残っている古いデータ（stockKnown）でも使用量の記録はできる。
+  const isSimple = isSimpleStockChemical(chemical);
+  const statusOnly = isStatusOnlyStock(chemical.stock);
+  const canRecordUsage = isSimple ? (stockKnown || statusOnly) : stockKnown;
   const hasWaste = !!waste;
   const wasteDisposed = hasWaste && !!waste.disposed;
   // 「この薬品の廃液を記録する」は、処分済み（アーカイブ）のタンクには書き込ませない
@@ -4505,7 +4538,7 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
           )}
         </div>
 
-        <SectionLabel>在庫状況（g）</SectionLabel>
+        <SectionLabel>{isSimple ? "在庫状況" : "在庫状況（g）"}</SectionLabel>
         <div style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 14, padding: 16, marginBottom: 20 }}>
           <div style={{ fontFamily: "'Roboto Mono', monospace", fontSize: stockKnown ? 26 : 16, fontWeight: 600, color: C.ink }}>
             {stockKnown ? (
@@ -4514,17 +4547,21 @@ function ChemicalDetail({ chemical, waste, onBack, onEdit, onOpenLocation, onOpe
                 <span style={{ fontSize: 14, color: C.inkSoft, fontWeight: 500 }}> g</span>
               </>
             ) : (
-              status === "full" ? "未開封（FULL）" : STATUS_META[status].sub
+              status === "full"
+                ? (isSimple ? "未開封" : "未開封（FULL）")
+                : status === "in_use" && isSimple
+                ? "使用中"
+                : STATUS_META[status].sub
             )}
           </div>
 
           <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
             <button
-              onClick={() => stockKnown && onRecord(chemical)}
-              disabled={!stockKnown}
-              style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 14, fontWeight: 600, borderRadius: 10, padding: "12px", cursor: stockKnown ? "pointer" : "not-allowed", opacity: stockKnown ? 1 : 0.45, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+              onClick={() => canRecordUsage && onRecord(chemical)}
+              disabled={!canRecordUsage}
+              style={{ flex: 1, border: "none", background: HEADER.bg, color: "#fff", fontSize: 14, fontWeight: 600, borderRadius: 10, padding: "12px", cursor: canRecordUsage ? "pointer" : "not-allowed", opacity: canRecordUsage ? 1 : 0.45, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
             >
-              <Package size={16} /> {stockKnown ? "残量を記録する" : STATUS_META[status].sub}
+              <Package size={16} /> {canRecordUsage ? (isSimple ? "使用量を記録する" : "残量を記録する") : STATUS_META[status].sub}
             </button>
             <button
               onClick={() => onDelete(chemical)}
@@ -4662,6 +4699,7 @@ function ChemicalEditPage({ chemical, wasteCategories, locationOptions: location
   const [locationName, setLocationName] = useState(canonicalLocationName(chemical.location?.name || ""));
   const [wasteId, setWasteId] = useState(chemical.wasteId || null);
   const [amount, setAmount] = useState(chemical.stock?.known === false ? "" : String(chemical.stock?.amount ?? ""));
+  // 通常の場所：true＝FULL（未開封）／false＝重量を記入。場所2：true＝未開封／false＝使用中
   const [isFull, setIsFull] = useState(chemical.stock?.known === false && chemical.stock?.status === "full");
   const [purpose, setPurpose] = useState(chemical.purpose || "");
   const [openDate, setOpenDate] = useState(chemical.openDate || "");
@@ -4696,11 +4734,16 @@ function ChemicalEditPage({ chemical, wasteCategories, locationOptions: location
   const baseLocationOptions = locationOptionsProp && locationOptionsProp.length ? locationOptionsProp : LOCATION_OPTIONS;
   const locationOptions = baseLocationOptions.includes(locationName) ? baseLocationOptions : [locationName, ...baseLocationOptions];
 
-  const canSave = name.trim() !== "" && locationName !== "" && (isFull || (amount !== "" && !isNaN(parseFloat(amount))));
+  // 場所2は重量を測らず、未開封／使用中の2択だけで登録する
+  const isSimple = isSimpleStockLocationName(locationName);
+
+  const canSave = name.trim() !== "" && locationName !== "" && (isSimple || isFull || (amount !== "" && !isNaN(parseFloat(amount))));
 
   const handleSave = () => {
     if (!canSave) return;
-    const stock = isFull
+    const stock = isSimple
+      ? { amount: 0, capacity: 0, unit: "g", known: false, status: isFull ? "full" : "in_use" }
+      : isFull
       ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
       : { amount: Math.max(0, parseFloat(amount)), capacity: 0, unit: "g", known: true };
     onSave(chemical, { name: name.trim(), formula: formula.trim(), cas: cas.trim(), locationName, subLocation: chemical.subLocation || "", wasteId, stock, purpose: purpose.trim(), openDate: openDate || "", riskAssessment });
@@ -4738,7 +4781,7 @@ function ChemicalEditPage({ chemical, wasteCategories, locationOptions: location
           ))}
         </select>
 
-        <SectionLabel>在庫量 <span style={{ color: C.danger }}>*</span></SectionLabel>
+        <SectionLabel>{isSimple ? "在庫の状態" : "在庫量"} <span style={{ color: C.danger }}>*</span></SectionLabel>
         <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
           <button
             type="button"
@@ -4756,7 +4799,7 @@ function ChemicalEditPage({ chemical, wasteCategories, locationOptions: location
               cursor: "pointer",
             }}
           >
-            重量を記入
+            {isSimple ? "使用中" : "重量を記入"}
           </button>
           <button
             type="button"
@@ -4774,10 +4817,16 @@ function ChemicalEditPage({ chemical, wasteCategories, locationOptions: location
               cursor: "pointer",
             }}
           >
-            FULL（未開封）
+            {isSimple ? "未開封" : "FULL（未開封）"}
           </button>
         </div>
-        {isFull ? (
+        {isSimple ? (
+          <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
+            {isFull
+              ? "重量を測らずに「未開封」として登録します"
+              : "重量を測らずに「使用中」として登録します。残りの目安（例：半分くらい）は下の備考に書いてください"}
+          </div>
+        ) : isFull ? (
           <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
             重量を測らずに「未開封（FULL）」として登録します
           </div>
@@ -4810,7 +4859,7 @@ function ChemicalEditPage({ chemical, wasteCategories, locationOptions: location
         </div>
         <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
           {isNewlyOpening
-            ? "「FULL」から「重量を記入」に切り替えたので、開封日として今日の日付を自動で入れています。違う日付なら修正してください"
+            ? `「${isSimple ? "未開封" : "FULL"}」から「${isSimple ? "使用中" : "重量を記入"}」に切り替えたので、開封日として今日の日付を自動で入れています。違う日付なら修正してください`
             : "薬品によっては開封後に劣化・変質するものがあります。開封した日を記録しておくと交換・廃棄の目安になります"}
         </div>
 
@@ -4818,10 +4867,15 @@ function ChemicalEditPage({ chemical, wasteCategories, locationOptions: location
         <textarea
           value={purpose}
           onChange={(e) => setPurpose(e.target.value)}
-          placeholder="例：抗酸化剤"
+          placeholder={isSimple ? "例：半分くらい残っている" : "例：抗酸化剤"}
           rows={2}
-          style={{ ...inputStyle, marginBottom: 20, resize: "none" }}
+          style={{ ...inputStyle, marginBottom: isSimple ? 6 : 20, resize: "none" }}
         />
+        {isSimple && (
+          <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
+            重量を測らない代わりに、残りの目安（目分量）などを必要に応じて書けます
+          </div>
+        )}
 
         <SectionLabel>リスクアセスメント対象</SectionLabel>
         <button
@@ -5834,6 +5888,13 @@ function RecordMassPage({ chemical, onBack, onSave }) {
   const [personName, setPersonName] = useState("");
   const [saved, setSaved] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  // 場所2：使用後の重量ではなく「今回使った量(g)」を記録する
+  const [used, setUsed] = useState("");
+  const usageMode = isSimpleStockChemical(chemical);
+  const hasWeight = chemical.stock?.known !== false;
+  const statusLabel = chemical.stock?.status === "full" ? "未開封" : "使用中";
+  const parsedUsed = parseFloat(used);
+  const usedValid = !isNaN(parsedUsed) && parsedUsed > 0;
 
   const today = new Date().toLocaleDateString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit" });
 
@@ -5841,7 +5902,9 @@ function RecordMassPage({ chemical, onBack, onSave }) {
   const parsedMass = parseFloat(mass);
   const usedAmount = !isNaN(parsedMass) ? +(previousAmount - parsedMass).toFixed(2) : null;
 
-  const canSave = !isNaN(parsedMass) && !!personName.trim() && !!note.trim();
+  const canSave = usageMode
+    ? usedValid && !!personName.trim() && !!note.trim()
+    : !isNaN(parsedMass) && !!personName.trim() && !!note.trim();
 
   const handleOpenConfirm = () => {
     if (!canSave) return;
@@ -5849,6 +5912,17 @@ function RecordMassPage({ chemical, onBack, onSave }) {
   };
 
   const handleConfirmSave = () => {
+    if (usageMode) {
+      const u = parseFloat(used);
+      if (isNaN(u) || u <= 0 || !personName.trim() || !note.trim()) return;
+      onSave(chemical.id, u, note.trim(), personName.trim(), { mode: "used" });
+      setConfirming(false);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1600);
+      setUsed("");
+      setNote("");
+      return;
+    }
     const value = parseFloat(mass);
     if (isNaN(value) || !personName.trim() || !note.trim()) return;
     onSave(chemical.id, value, note.trim(), personName.trim());
@@ -5861,7 +5935,7 @@ function RecordMassPage({ chemical, onBack, onSave }) {
 
   return (
     <div>
-      <TopBar title="残量の記録" onBack={onBack} />
+      <TopBar title={usageMode ? "使用量の記録" : "残量の記録"} onBack={onBack} />
       <div style={{ padding: 16 }}>
         <div style={{ fontSize: 11.5, color: C.danger, marginBottom: 16 }}>
           <span style={{ fontWeight: 700 }}>*</span> は必須項目です
@@ -5875,8 +5949,10 @@ function RecordMassPage({ chemical, onBack, onSave }) {
             </div>
           </div>
           <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 11, color: C.inkSoft }}>現在庫</div>
-            <div style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 600, color: C.ink }}>{chemical.stock?.amount ?? 0} g</div>
+            <div style={{ fontSize: 11, color: C.inkSoft }}>{usageMode && !hasWeight ? "現在の状態" : "現在庫"}</div>
+            <div style={{ fontFamily: "'Roboto Mono', monospace", fontWeight: 600, color: C.ink }}>
+              {usageMode && !hasWeight ? statusLabel : `${chemical.stock?.amount ?? 0} g`}
+            </div>
           </div>
         </div>
 
@@ -5891,6 +5967,28 @@ function RecordMassPage({ chemical, onBack, onSave }) {
           placeholder="氏名"
         />
 
+        {usageMode ? (
+          <React.Fragment>
+            <SectionLabel>今回の使用量 <span style={{ color: C.danger }}>*</span></SectionLabel>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.paper, border: `1.5px solid ${C.line}`, borderRadius: 12, padding: "10px 14px", marginBottom: 6 }}>
+              <input
+                type="number"
+                inputMode="decimal"
+                value={used}
+                onChange={(e) => setUsed(e.target.value)}
+                placeholder="0.0"
+                style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 20, fontFamily: "'Roboto Mono', monospace", color: C.ink }}
+              />
+              <span style={{ fontSize: 14, color: C.inkSoft, fontWeight: 600 }}>g</span>
+            </div>
+            <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 18, lineHeight: 1.6 }}>
+              今回使った量をg単位で入力してください。この場所は重量を測らないので、在庫量は更新されません。
+              {hasWeight && "（重量が登録されている薬品は、入力した量だけ在庫から差し引きます）"}
+              {!hasWeight && chemical.stock?.status === "full" && "未開封の薬品に記録すると、自動で「使用中」になり、開封日が未入力なら今日の日付が入ります。"}
+            </div>
+          </React.Fragment>
+        ) : (
+          <React.Fragment>
         <SectionLabel>使用後の重量  <span style={{ color: C.danger }}>*</span></SectionLabel>
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.paper, border: `1.5px solid ${C.line}`, borderRadius: 12, padding: "10px 14px", marginBottom: 6 }}>
           <input
@@ -5922,6 +6020,8 @@ function RecordMassPage({ chemical, onBack, onSave }) {
             </span>
           </div>
         )}
+          </React.Fragment>
+        )}
 
         <SectionLabel>使用目的 <span style={{ color: C.danger }}>*</span></SectionLabel>
         <textarea
@@ -5937,12 +6037,12 @@ function RecordMassPage({ chemical, onBack, onSave }) {
           disabled={!canSave}
           style={{ width: "100%", border: "none", background: canSave ? HEADER.bg : "#B7C0BC", color: "#fff", fontSize: 15, fontWeight: 600, borderRadius: 12, padding: "13px", cursor: canSave ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
         >
-          <Save size={16} /> 在庫を更新する
+          <Save size={16} /> {usageMode ? "使用を記録する" : "在庫を更新する"}
         </button>
 
         {saved && (
           <div style={{ marginTop: 14, textAlign: "center", fontSize: 13, fontWeight: 600, color: C.tealDeep, background: C.okBg, borderRadius: 10, padding: "10px" }}>
-            記録しました。在庫を更新しました。
+            {usageMode ? "記録しました。" : "記録しました。在庫を更新しました。"}
           </div>
         )}
       </div>
@@ -5951,18 +6051,26 @@ function RecordMassPage({ chemical, onBack, onSave }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(24,37,36,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20 }}>
           <div style={{ background: C.paper, borderRadius: 16, padding: "20px 20px 18px", width: "100%", maxWidth: 340 }}>
             <div style={{ fontWeight: 700, fontSize: 15, color: C.ink, marginBottom: 4 }}>この内容で保存しますか？</div>
-            <div style={{ fontSize: 12, color: C.inkSoft, marginBottom: 14 }}>保存すると在庫が更新され、使用記録として残ります。</div>
+            <div style={{ fontSize: 12, color: C.inkSoft, marginBottom: 14 }}>
+              {usageMode ? "保存すると使用記録として残ります。" : "保存すると在庫が更新され、使用記録として残ります。"}
+            </div>
 
             <div style={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px", fontSize: 13, color: C.ink, lineHeight: 2, marginBottom: 18 }}>
               <div><span style={{ color: C.inkSoft }}>薬品：</span>{chemical.name}</div>
               <div><span style={{ color: C.inkSoft }}>記録日：</span>{today}</div>
               <div><span style={{ color: C.inkSoft }}>氏名：</span>{personName.trim()}</div>
-              <div><span style={{ color: C.inkSoft }}>使用後の重量：</span>{mass} g</div>
-              {usedAmount !== null && (
-                <div>
-                  <span style={{ color: C.inkSoft }}>{usedAmount >= 0 ? "使用量：" : "増加（在庫の訂正）：" }</span>
-                  {Math.abs(usedAmount)} g
-                </div>
+              {usageMode ? (
+                <div><span style={{ color: C.inkSoft }}>使用量：</span>{used} g</div>
+              ) : (
+                <React.Fragment>
+                  <div><span style={{ color: C.inkSoft }}>使用後の重量：</span>{mass} g</div>
+                  {usedAmount !== null && (
+                    <div>
+                      <span style={{ color: C.inkSoft }}>{usedAmount >= 0 ? "使用量：" : "増加（在庫の訂正）：" }</span>
+                      {Math.abs(usedAmount)} g
+                    </div>
+                  )}
+                </React.Fragment>
               )}
               <div><span style={{ color: C.inkSoft }}>使用目的：</span>{note.trim()}</div>
             </div>
@@ -6051,7 +6159,10 @@ function AddChemicalPage({ chemicals, wasteCategories, locationOptions, onBack, 
     wasFullRef.current = isFull;
   }, [isFull]);
 
-  const canSave = name.trim() && locationName && (isFull || (amount !== "" && !isNaN(parseFloat(amount))));
+  // 場所2は重量を測らず、未開封／使用中の2択だけで登録する（isFull＝未開封）
+  const isSimple = isSimpleStockLocationName(locationName);
+
+  const canSave = name.trim() && locationName && (isSimple || isFull || (amount !== "" && !isNaN(parseFloat(amount))));
 
   const inputStyle = {
     width: "100%",
@@ -6074,6 +6185,7 @@ function AddChemicalPage({ chemicals, wasteCategories, locationOptions, onBack, 
       subLocation: "",
       amount: isFull ? null : parseFloat(amount),
       isFull,
+      statusOnly: isSimple,
       purpose: purpose.trim(),
       wasteId,
       openDate: isFull ? "" : openDate,
@@ -6115,7 +6227,7 @@ function AddChemicalPage({ chemicals, wasteCategories, locationOptions, onBack, 
             <option key={name} value={name}>{displayLocationName(name)}</option>
           ))}
         </select>
-        <SectionLabel>在庫量 <span style={{ color: C.danger }}>*</span></SectionLabel>
+        <SectionLabel>{isSimple ? "在庫の状態" : "在庫量"} <span style={{ color: C.danger }}>*</span></SectionLabel>
         <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
           <button
             type="button"
@@ -6133,7 +6245,7 @@ function AddChemicalPage({ chemicals, wasteCategories, locationOptions, onBack, 
               cursor: "pointer",
             }}
           >
-            重量を記入
+            {isSimple ? "使用中" : "重量を記入"}
           </button>
           <button
             type="button"
@@ -6151,10 +6263,16 @@ function AddChemicalPage({ chemicals, wasteCategories, locationOptions, onBack, 
               cursor: "pointer",
             }}
           >
-            FULL（未開封）
+            {isSimple ? "未開封" : "FULL（未開封）"}
           </button>
         </div>
-        {isFull ? (
+        {isSimple ? (
+          <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
+            {isFull
+              ? "重量を測らずに「未開封」として登録します"
+              : "重量を測らずに「使用中」として登録します。残りの目安（例：半分くらい）は下の備考に書いてください"}
+          </div>
+        ) : isFull ? (
           <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
             重量を測らずに「未開封（FULL）」として登録します
           </div>
@@ -6187,7 +6305,7 @@ function AddChemicalPage({ chemicals, wasteCategories, locationOptions, onBack, 
               style={{ ...inputStyle, marginBottom: 4 }}
             />
             <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
-              すでに開封済みの薬品を登録する場合は、分かる範囲で入力してください（未記入でも登録できます）。「FULL」から切り替えた場合は今日の日付が自動で入ります
+              すでに開封済みの薬品を登録する場合は、分かる範囲で入力してください（未記入でも登録できます）。「{isSimple ? "未開封" : "FULL"}」から切り替えた場合は今日の日付が自動で入ります
             </div>
           </React.Fragment>
         )}
@@ -6196,10 +6314,15 @@ function AddChemicalPage({ chemicals, wasteCategories, locationOptions, onBack, 
         <textarea
           value={purpose}
           onChange={(e) => setPurpose(e.target.value)}
-          placeholder="例：抗酸化剤"
+          placeholder={isSimple ? "例：半分くらい残っている" : "例：抗酸化剤"}
           rows={2}
-          style={{ ...inputStyle, marginBottom: 20, resize: "none" }}
+          style={{ ...inputStyle, marginBottom: isSimple ? 6 : 20, resize: "none" }}
         />
+        {isSimple && (
+          <div style={{ fontSize: 11.5, color: C.inkSoft, marginBottom: 20 }}>
+            重量を測らない代わりに、残りの目安（目分量）などを必要に応じて書けます
+          </div>
+        )}
 
         <SectionLabel>リスクアセスメント対象</SectionLabel>
         <button
@@ -6526,7 +6649,9 @@ function BulkAddChemicalsPage({ chemicals, locationOptions, onBack, onSave }) {
   });
   const removeRow = (key) => setRows((rs) => (rs.length > 1 ? rs.filter((r) => r.key !== key) : [newRow(options[0])]));
 
-  const amountOk = (r) => r.isFull || (r.amount !== "" && !isNaN(parseFloat(r.amount)));
+  // 場所2の行は重量を測らない（isFull＝未開封／false＝使用中）ので、重量の入力チェックは不要
+  const isSimpleRow = (r) => isSimpleStockLocationName(r.locationName);
+  const amountOk = (r) => isSimpleRow(r) || r.isFull || (r.amount !== "" && !isNaN(parseFloat(r.amount)));
   const filled = rows.filter((r) => r.name.trim() !== "");
   const invalidCount = filled.filter((r) => !amountOk(r)).length;
   const canSave = filled.length > 0 && invalidCount === 0 && !busy;
@@ -6545,7 +6670,7 @@ function BulkAddChemicalsPage({ chemicals, locationOptions, onBack, onSave }) {
     if (!canSave) return;
     setBusy(true);
     try {
-      await onSave(filled.map((r) => ({ name: r.name.trim(), locationName: r.locationName, isFull: r.isFull, amount: r.isFull ? null : parseFloat(r.amount) })));
+      await onSave(filled.map((r) => ({ name: r.name.trim(), locationName: r.locationName, isFull: r.isFull, statusOnly: isSimpleRow(r), amount: r.isFull || isSimpleRow(r) ? null : parseFloat(r.amount) })));
     } finally {
       setBusy(false);
     }
@@ -6584,11 +6709,11 @@ function BulkAddChemicalsPage({ chemicals, locationOptions, onBack, onSave }) {
               <select style={{ ...inputStyle, marginBottom: 8 }} value={r.locationName} onChange={(e) => update(r.key, { locationName: e.target.value })}>
                 {options.map((n) => <option key={n} value={n}>{displayLocationName(n)}</option>)}
               </select>
-              <div style={{ display: "flex", gap: 8, marginBottom: r.isFull ? 0 : 8 }}>
-                <button type="button" onClick={() => update(r.key, { isFull: true })} style={segBtn(r.isFull)}>FULL（未開封）</button>
-                <button type="button" onClick={() => update(r.key, { isFull: false })} style={segBtn(!r.isFull)}>重量を記入</button>
+              <div style={{ display: "flex", gap: 8, marginBottom: r.isFull || isSimpleRow(r) ? 0 : 8 }}>
+                <button type="button" onClick={() => update(r.key, { isFull: true })} style={segBtn(r.isFull)}>{isSimpleRow(r) ? "未開封" : "FULL（未開封）"}</button>
+                <button type="button" onClick={() => update(r.key, { isFull: false })} style={segBtn(!r.isFull)}>{isSimpleRow(r) ? "使用中" : "重量を記入"}</button>
               </div>
-              {!r.isFull && (
+              {!r.isFull && !isSimpleRow(r) && (
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <input
                     style={{ ...inputStyle, flex: 1, fontFamily: "'Roboto Mono', monospace" }}
@@ -6680,6 +6805,8 @@ function BulkEditChemicalsPage({ chemicals, wasteCategories, locationOptions, on
     setStep("edit");
   };
   const upd = (id, patch) => setDrafts((ds) => ({ ...ds, [id]: { ...ds[id], ...patch } }));
+  // 在庫の未開封／使用中ボタンを触った行だけ、場所2の在庫状態を書き換える対象にする
+  const updStock = (id, isFull) => upd(id, { isFull, stockTouched: true });
   const setAllLocations = (name) => {
     if (!name) return;
     setDrafts((ds) => {
@@ -6706,15 +6833,26 @@ function BulkEditChemicalsPage({ chemicals, wasteCategories, locationOptions, on
       if (d.cas.trim() !== (c.cas || "")) patch.cas = d.cas.trim();
       if (d.locationName !== canonicalLocationName(c.location?.name || "")) patch.locationName = d.locationName;
       if (d.purpose.trim() !== (c.purpose || "")) patch.purpose = d.purpose.trim();
-      const stockChanged = d.isFull !== d.isFull0 || (!d.isFull && d.amount !== d.amount0);
-      if (stockChanged) {
-        if (!d.isFull && (d.amount === "" || isNaN(parseFloat(d.amount)))) invalid += 1;
-        else {
-          patch.stock = d.isFull
-            ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
-            : { amount: Math.max(0, parseFloat(d.amount)), capacity: 0, unit: "g", known: true };
-          // 「FULL」から「重量を記入」に変えた＝開封したので、開封日が空なら今日の日付を入れる
-          if (d.isFull0 && !d.isFull && !c.openDate) patch.openDate = todayDateStr();
+      if (isSimpleStockLocationName(d.locationName)) {
+        // 場所2：重量なしで未開封／使用中だけ。ボタンを触った行で、現在の状態と違う時だけ書き換える
+        const desired = d.isFull ? "full" : "in_use";
+        const cur = isStatusOnlyStock(c.stock) ? c.stock.status : null;
+        if (d.stockTouched && desired !== cur) {
+          patch.stock = { amount: 0, capacity: 0, unit: "g", known: false, status: desired };
+          // 「未開封」から「使用中」に変えた＝開封したので、開封日が空なら今日の日付を入れる
+          if (cur === "full" && desired === "in_use" && !c.openDate) patch.openDate = todayDateStr();
+        }
+      } else {
+        const stockChanged = d.isFull !== d.isFull0 || (!d.isFull && d.amount !== d.amount0);
+        if (stockChanged) {
+          if (!d.isFull && (d.amount === "" || isNaN(parseFloat(d.amount)))) invalid += 1;
+          else {
+            patch.stock = d.isFull
+              ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
+              : { amount: Math.max(0, parseFloat(d.amount)), capacity: 0, unit: "g", known: true };
+            // 「FULL」から「重量を記入」に変えた＝開封したので、開封日が空なら今日の日付を入れる
+            if (d.isFull0 && !d.isFull && !c.openDate) patch.openDate = todayDateStr();
+          }
         }
       }
       if (wasteApply && (c.wasteId || null) !== wasteId) patch.wasteId = wasteId;
@@ -6822,6 +6960,7 @@ function BulkEditChemicalsPage({ chemicals, wasteCategories, locationOptions, on
             const d = drafts[c.id];
             if (!d) return null;
             const locOpts = options.includes(d.locationName) ? options : [d.locationName, ...options];
+            const simpleRow = isSimpleStockLocationName(d.locationName);
             return (
               <div key={c.id} style={{ background: C.paper, border: `1.5px solid ${changedIds.has(c.id) ? C.tealDeep : C.line}`, borderRadius: 12, padding: 12 }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
@@ -6835,10 +6974,10 @@ function BulkEditChemicalsPage({ chemicals, wasteCategories, locationOptions, on
                   {locOpts.map((n) => <option key={n} value={n}>{displayLocationName(n)}</option>)}
                 </select>
                 <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                  <button type="button" onClick={() => upd(c.id, { isFull: true })} style={segBtn(d.isFull)}>FULL（未開封）</button>
-                  <button type="button" onClick={() => upd(c.id, { isFull: false })} style={segBtn(!d.isFull)}>重量を記入</button>
+                  <button type="button" onClick={() => updStock(c.id, true)} style={segBtn(d.isFull)}>{simpleRow ? "未開封" : "FULL（未開封）"}</button>
+                  <button type="button" onClick={() => updStock(c.id, false)} style={segBtn(!d.isFull)}>{simpleRow ? "使用中" : "重量を記入"}</button>
                 </div>
-                {!d.isFull && (
+                {!d.isFull && !simpleRow && (
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                     <input style={{ ...inputStyle, flex: 1, fontFamily: "'Roboto Mono', monospace" }} inputMode="decimal" value={d.amount} onChange={(e) => upd(c.id, { amount: e.target.value })} placeholder="残量" />
                     <span style={{ fontSize: 13, color: C.inkSoft }}>g</span>
@@ -7521,9 +7660,46 @@ const toggleTheme = () => {
   // 薬品の追加・編集で選べる保管場所（「場所を追加」「サブロケーションを追加」した場所も含む）
   const locationOptionNames = useMemo(() => buildLocationOptionNames(chemicals, locationsMeta), [chemicals, locationsMeta]);
 
-  const handleSaveMass = async (chemId, remaining, note, personName) => {
+  const handleSaveMass = async (chemId, remaining, note, personName, opts) => {
     const chem = chemicals.find((c) => c.id === chemId);
     if (!chem) return;
+    // 場所2：入力値は「今回の使用量(g)」。重量は測らないので、在庫量は更新せず状態だけ更新する
+    if (opts && opts.mode === "used") {
+      const used = +Number(remaining).toFixed(2);
+      if (!(used > 0) || !personName) return;
+      try {
+        const stockUpdates = {};
+        if (chem.stock?.known !== false) {
+          // 重量が残っている古いデータは、使った量だけ在庫から引く
+          stockUpdates["stock.amount"] = Math.max(0, +((chem.stock?.amount ?? 0) - used).toFixed(2));
+        } else if (chem.stock?.status === "full") {
+          // 未開封に使用量を記録した＝開封した、とみなして「使用中」にする（開封日が空なら今日）
+          stockUpdates["stock.status"] = "in_use";
+          if (!chem.openDate) stockUpdates.openDate = todayDateStr();
+        }
+        const stockChanged = Object.keys(stockUpdates).length > 0;
+        if (stockChanged) {
+          await withDbTimeout(db.collection("chemicals").doc(chemId).update(stockUpdates), "saveUsed-update-timeout");
+        }
+        try {
+          await withDbTimeout(db.collection("usageEntries").doc("u_" + Date.now()).set({
+            chemicalId: chem.id,
+            chemicalName: chem.name,
+            date: todayDateStr(),
+            personName,
+            purpose: note || "",
+            amount: used,
+            unit: "g",
+            createdAt: Date.now(),
+          }), "addUsageEntry-set-timeout");
+        } catch (usageErr) {
+          console.warn("使用記録の保存に失敗:", usageErr);
+          toastFail(stockChanged ? "使用記録の保存（在庫の状態は更新済みです）" : "使用記録の保存", usageErr);
+        }
+        bumpSyncVersion(stockChanged ? ["chemicals", "usageEntries"] : ["usageEntries"]).catch((e) => console.warn("syncVersion更新に失敗:", e));
+      } catch (e) { toastFail("使用量の保存", e); }
+      return;
+    }
     const previousAmount = chem.stock?.amount ?? 0;
     const newAmount = Math.max(0, +remaining.toFixed(2));
     const usedAmount = +(previousAmount - newAmount).toFixed(2);
@@ -7730,10 +7906,15 @@ const toggleTheme = () => {
     );
   };
 
-  const handleAddChemical = async ({ name, formula, cas, locationName, subLocation, amount, isFull, purpose, wasteId, openDate, riskAssessment }) => {
+  const handleAddChemical = async ({ name, formula, cas, locationName, subLocation, amount, isFull, statusOnly, purpose, wasteId, openDate, riskAssessment }) => {
     const location = resolveLocation(locationName);
     const newId = "c_" + Date.now();
-    const stock = isFull ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" } : { amount, capacity: 0, unit: "g", known: true };
+    // statusOnly＝場所2（重量なし）。未開封はFULL、使用中は in_use として保存する
+    const stock = isFull
+      ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
+      : statusOnly
+      ? { amount: 0, capacity: 0, unit: "g", known: false, status: "in_use" }
+      : { amount, capacity: 0, unit: "g", known: true };
     try{
       await withDbTimeout(db
         .collection("chemicals")
@@ -7845,6 +8026,8 @@ const toggleTheme = () => {
         const matched = chemicals.find((c) => c.name && c.name.trim().toLowerCase() === r.name.toLowerCase());
         const stock = r.isFull
           ? { amount: 0, capacity: 0, unit: "g", known: false, status: "full" }
+          : r.statusOnly
+          ? { amount: 0, capacity: 0, unit: "g", known: false, status: "in_use" }
           : { amount: r.amount, capacity: 0, unit: "g", known: true };
         batch.set(db.collection("chemicals").doc(`c_${base}_${i}`), {
           name: r.name, formula: "", cas: matched?.cas || CAS_LOOKUP[r.name] || "",
